@@ -1,0 +1,14 @@
+# Never wanted in a build context/image.
+.git
+.github
+.gitignore
+.pytest_cache
+__pycache__
+*.pyc
+.venv
+venv
+
+# Demo/dev-only, not part of the runtime image.
+data/
+tests/
+screenshots/

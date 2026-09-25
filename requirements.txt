@@ -1,0 +1,6 @@
+# Runtime dependencies. Pinned to what's been tested against this codebase -
+# bump deliberately, not incidentally, and re-run the full test suite after.
+fastapi==0.141.1
+uvicorn==0.54.0
+pydantic==2.13.4
+pyjwt[crypto]==2.15.0

@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import __version__
 from .migrations import migrate
 
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
@@ -90,7 +91,7 @@ def check_token(x_token: str | None = Header(default=None)) -> None:
 
 
 # -------------------------------------------------------------------------- app
-app = FastAPI(title="Story Bible", version="0.1.0")
+app = FastAPI(title="Story Bible", version=__version__)
 init_db()
 
 
@@ -113,7 +114,7 @@ def check_kind(kind: str) -> None:
 # ---- health
 @app.get("/api/health")
 def health():
-    return {"ok": True, "auth": bool(TOKEN)}
+    return {"ok": True, "auth": bool(TOKEN), "version": __version__}
 
 
 # ---- series
