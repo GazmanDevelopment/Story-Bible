@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Neither job pushes anything or calls the GitHub API - checkout and a local
+# docker build only need to read the repo.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Run tests
