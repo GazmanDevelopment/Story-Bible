@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Story Bible</title>
+  <link rel="stylesheet" href="styles.css?v=2">
+  <!-- Office.js. Outside Word the page still works as a normal web app. -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+</head>
+<body>
+  <header id="top">
+    <div class="row">
+      <select id="seriesSelect" title="Series"></select>
+      <button id="btnFind" class="icon word-only" title="Look up the selected name in the document">Find</button>
+    </div>
+    <div id="linkBar" class="linkbar word-only"></div>
+    <nav id="tabs">
+      <button data-tab="characters">Characters</button>
+      <button data-tab="locations">Places</button>
+      <button data-tab="events">Timeline</button>
+      <button data-tab="series">Series</button>
+    </nav>
+  </header>
+  <main id="main"></main>
+  <div id="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>

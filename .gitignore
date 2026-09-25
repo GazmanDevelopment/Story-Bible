@@ -1,0 +1,10 @@
+data/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.pytest_cache/
+*.pem
+*.key
+*.crt

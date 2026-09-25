@@ -1,0 +1,96 @@
+{
+  "series": {
+    "id": "s",
+    "name": "Series B \u2013 After Hours",
+    "anchor_mode": "relative",
+    "anchor_label": "Night one",
+    "character_fields": [
+      "Build",
+      "Skin",
+      "Chest / breasts",
+      "Genitals",
+      "Tattoos",
+      "Piercings",
+      "Distinguishing marks",
+      "Voice & mannerisms"
+    ],
+    "description": "One long weekend at a boutique hotel."
+  },
+  "chapters": [
+    {
+      "id": "b1",
+      "number": 1,
+      "title": "Check-in"
+    }
+  ],
+  "characters": [
+    {
+      "id": "dana",
+      "name": "Dana",
+      "role": "Protagonist",
+      "age": "38",
+      "hair": "Silver pixie",
+      "eyes": "Brown",
+      "style": "Tailored",
+      "custom": {}
+    },
+    {
+      "id": "jules",
+      "name": "Jules",
+      "role": "Night manager",
+      "age": "31",
+      "hair": "Brown, tied back",
+      "eyes": "Blue",
+      "style": "Uniform",
+      "custom": {}
+    }
+  ],
+  "locations": [
+    {
+      "id": "hotel",
+      "name": "The Carrington",
+      "place": "Blue Mountains, NSW",
+      "relevance": "Whole story takes place here",
+      "character_ids": [
+        "dana",
+        "jules"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "id": "x1",
+      "title": "Dana checks in late",
+      "off_y": 0,
+      "off_m": 0,
+      "off_d": 0,
+      "character_ids": [
+        "dana",
+        "jules"
+      ],
+      "chapter_id": "b1",
+      "location_id": "hotel"
+    },
+    {
+      "id": "x2",
+      "title": "Checkout",
+      "off_y": 0,
+      "off_m": 0,
+      "off_d": 3,
+      "character_ids": [
+        "dana"
+      ],
+      "chapter_id": "",
+      "location_id": "hotel"
+    }
+  ],
+  "relationships": [
+    {
+      "id": "r0",
+      "from": "jules",
+      "type": "flirts with",
+      "to": "dana",
+      "note": ""
+    }
+  ]
+}
