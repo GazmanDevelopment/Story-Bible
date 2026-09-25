@@ -19,8 +19,8 @@ const REL_TYPES = ["married to", "partner of", "mistress of", "lover of", "ex of
   "friend of", "best friend of", "sibling of", "parent of", "boss of", "colleague of",
   "neighbour of", "rival of", "flirts with"];
 
-const DEFAULT_FIELDS = ["Build", "Skin", "Chest / breasts", "Genitals", "Tattoos",
-  "Piercings", "Distinguishing marks", "Voice & mannerisms"];
+const DEFAULT_FIELDS = ["Build", "Skin", "Tattoos", "Piercings",
+  "Distinguishing marks", "Voice & mannerisms"];
 
 // ------------------------------------------------------------------ helpers
 const $ = (sel, el = document) => el.querySelector(sel);

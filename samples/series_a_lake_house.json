@@ -8,8 +8,6 @@
     "character_fields": [
       "Build",
       "Skin",
-      "Chest / breasts",
-      "Genitals",
       "Tattoos",
       "Piercings",
       "Distinguishing marks",
@@ -48,7 +46,6 @@
       "aliases": "Mark, Hale",
       "custom": {
         "Build": "Swimmer's build, broad shoulders",
-        "Genitals": "(your detail here)",
         "Tattoos": "None",
         "Distinguishing marks": "Scar through left eyebrow",
         "Voice & mannerisms": "Quiet, rubs his jaw when lying"
@@ -68,7 +65,6 @@
       "style": "Natural",
       "custom": {
         "Build": "Petite, runner",
-        "Chest / breasts": "(your detail here)",
         "Tattoos": "Small swallow, right hip",
         "Piercings": "Ears only"
       },
@@ -89,8 +85,7 @@
       "custom": {
         "Build": "Tall, curvy",
         "Tattoos": "Full sleeve, left arm (moths & roses)",
-        "Piercings": "Septum, tongue",
-        "Chest / breasts": "(your detail here)"
+        "Piercings": "Septum, tongue"
       },
       "preferences": "(your detail here)",
       "backstory": "Tattoo artist Mark hires to design a mural for the lake house."
