@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-FIELDS = ["Build", "Skin", "Chest / breasts", "Genitals", "Tattoos", "Piercings",
+FIELDS = ["Build", "Skin", "Tattoos", "Piercings",
           "Distinguishing marks", "Voice & mannerisms"]
 
 
@@ -24,14 +24,14 @@ A = bundle(
         {"id": "mark", "name": "Mark Hale", "role": "Protagonist", "age": "34", "gender": "Male",
          "height": "185 cm", "hair": "Dark brown, short", "eyes": "Grey", "style": "Smart casual",
          "aliases": "Mark, Hale",
-         "custom": {"Build": "Swimmer's build, broad shoulders", "Genitals": "(your detail here)",
+         "custom": {"Build": "Swimmer's build, broad shoulders",
                     "Tattoos": "None", "Distinguishing marks": "Scar through left eyebrow",
                     "Voice & mannerisms": "Quiet, rubs his jaw when lying"},
          "preferences": "(your detail here)",
          "backstory": "Architect. Married Sally at 27. Restless since the business took off."},
         {"id": "sally", "name": "Sally Hale", "role": "Wife", "age": "32", "gender": "Female",
          "height": "165 cm", "hair": "Honey blonde, shoulder length", "eyes": "Blue", "style": "Natural",
-         "custom": {"Build": "Petite, runner", "Chest / breasts": "(your detail here)",
+         "custom": {"Build": "Petite, runner",
                     "Tattoos": "Small swallow, right hip", "Piercings": "Ears only"},
          "preferences": "(your detail here)",
          "backstory": "Primary-school teacher. Knows more than she lets on."},
@@ -39,7 +39,7 @@ A = bundle(
          "height": "172 cm", "hair": "Jet black, undercut", "eyes": "Green", "style": "Goth",
          "aliases": "Bets",
          "custom": {"Build": "Tall, curvy", "Tattoos": "Full sleeve, left arm (moths & roses)",
-                    "Piercings": "Septum, tongue", "Chest / breasts": "(your detail here)"},
+                    "Piercings": "Septum, tongue"},
          "preferences": "(your detail here)",
          "backstory": "Tattoo artist Mark hires to design a mural for the lake house."},
         {"id": "kristy", "name": "Kristy Dunn", "role": "Friend", "age": "33", "gender": "Female",
