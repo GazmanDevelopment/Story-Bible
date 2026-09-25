@@ -1,0 +1,5 @@
+# Dev/test-only dependencies, on top of requirements.txt.
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1        # fastapi.testclient.TestClient depends on this
+playwright==1.63.0   # tests/test_ui.py - run `playwright install chromium` once after installing

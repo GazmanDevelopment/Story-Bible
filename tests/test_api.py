@@ -33,6 +33,13 @@ def test_flow():
     c.delete(f"/api/series/{s['id']}")
     assert c.get(f"{base}/bundle").status_code == 404
 
+def test_health():
+    from app import __version__
+    r = c.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"ok": True, "auth": False, "version": __version__}
+
 def test_pragmas():
     """Per-request connections must have the hardening pragmas set, and
     the database itself must be in WAL mode (set once, at init)."""
