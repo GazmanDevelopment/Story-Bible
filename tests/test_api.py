@@ -32,3 +32,13 @@ def test_flow():
     assert c.get(f"{base}/widgets").status_code == 404
     c.delete(f"/api/series/{s['id']}")
     assert c.get(f"{base}/bundle").status_code == 404
+
+def test_pragmas():
+    """Per-request connections must have the hardening pragmas set, and
+    the database itself must be in WAL mode (set once, at init)."""
+    from app.main import db
+    with db() as con:
+        assert con.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert con.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+        assert con.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
+        assert con.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
