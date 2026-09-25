@@ -2,8 +2,9 @@
 Story Bible - backend for the Word task-pane add-in.
 
 A small FastAPI + SQLite service. Every record belongs to a Series.
-Records are stored as JSON blobs so new fields can be added in the UI
-without database migrations.
+Records are stored as JSON blobs so new *fields* can be added in the UI
+without a schema change. Schema changes themselves (new tables/columns)
+are handled by app/migrations.py and applied automatically on startup.
 
 Env vars:
   STORYBIBLE_DB     path to the SQLite file   (default /data/storybible.db)
@@ -26,6 +27,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .migrations import migrate
+
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
 TOKEN = os.environ.get("STORYBIBLE_TOKEN", "").strip()
 STATIC_DIR = Path(__file__).parent / "static"
@@ -36,23 +39,18 @@ KINDS = ("chapters", "characters", "locations", "events", "relationships")
 
 # --------------------------------------------------------------------------- db
 def init_db() -> None:
+    """Create /data if needed and bring the database up to the latest
+    schema. Runs once at import time, on its own connection (not through
+    `db()`, since migrations manage their own transactions). Raises if the
+    database is newer than this build understands - see app/migrations.py."""
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    with db() as con:
-        con.execute(
-            """CREATE TABLE IF NOT EXISTS series (
-                   id TEXT PRIMARY KEY,
-                   data TEXT NOT NULL,
-                   updated REAL NOT NULL)"""
-        )
-        con.execute(
-            """CREATE TABLE IF NOT EXISTS records (
-                   id TEXT PRIMARY KEY,
-                   series_id TEXT NOT NULL REFERENCES series(id) ON DELETE CASCADE,
-                   kind TEXT NOT NULL,
-                   data TEXT NOT NULL,
-                   updated REAL NOT NULL)"""
-        )
-        con.execute("CREATE INDEX IF NOT EXISTS ix_rec ON records(series_id, kind)")
+    con = sqlite3.connect(DB_PATH)
+    try:
+        con.execute("PRAGMA journal_mode = WAL")  # persisted in the file; no need to reset per connection
+        con.isolation_level = None  # autocommit; migrate() drives its own transactions
+        migrate(con)
+    finally:
+        con.close()
 
 
 @contextmanager
@@ -60,7 +58,8 @@ def db():
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
-    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA busy_timeout = 5000")   # wait rather than fail when another save holds the write lock
+    con.execute("PRAGMA synchronous = NORMAL")  # safe with WAL; avoids an fsync on every write
     try:
         yield con
         con.commit()
