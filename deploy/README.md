@@ -27,7 +27,7 @@ cd /mnt/tank/apps/storybible-src
 ```
 
 (`.env.example` here documents every setting the app reads, for reference -
-see step 4 for where the values actually go for this deployment path.)
+see steps 3-4 for where the values actually go for this deployment path.)
 
 ## 3. Build the image
 
@@ -35,25 +35,29 @@ see step 4 for where the values actually go for this deployment path.)
 sh deploy/update.sh
 ```
 
-This builds `story-bible:<version>` and tags it `story-bible:current`. It's
-also what you re-run for every future update (`git pull` + rebuild) -
-see the comment at the top of the script for rollback.
+This builds `story-bible:<version>` and tags it `story-bible:current`, and
+(first run only) creates `deploy/compose.yaml` from `deploy/compose.yaml.example`
+if it doesn't exist yet. It's also what you re-run for every future update
+(`git pull` + rebuild) - see the comment at the top of the script for
+rollback.
+
+**`deploy/compose.yaml` is gitignored - edit real values into it, never
+into `deploy/compose.yaml.example`.** That split exists specifically so
+`git pull` (every future run of this same script) never collides with your
+local edits (#38) - a tracked file with real secrets edited into it would
+conflict with the next pull, every time.
 
 ## 4. Create the Custom App
 
-TrueNAS UI → **Apps → Discover Apps** → (top-right) **Install via YAML** →
-paste the contents of `deploy/compose.yaml`, then, **in the pasted text
-itself** (this dialog doesn't accept a separate `.env` file - #36):
+Edit `deploy/compose.yaml` (created in step 3): adjust the dataset path in
+`volumes:` if you used a different pool/path than step 1, set
+`STORYBIBLE_TOKEN` to a real secret (see the comment above it in the YAML
+for how to generate one), and set `FORWARDED_ALLOW_IPS` to the Synology
+reverse proxy's LAN IP (#7).
 
-- adjust the dataset path in `volumes:` if you used a different pool/path
-  than step 1
-- set `STORYBIBLE_TOKEN` to a real secret (see the comment above it in the
-  YAML for how to generate one)
-- set `FORWARDED_ALLOW_IPS` to the Synology reverse proxy's LAN IP (#7)
-
-then install. Don't paste those real values back into a copy of
-`compose.yaml` that gets committed to git - keep the checked-in file's
-placeholders as they are.
+Then, TrueNAS UI → **Apps → Discover Apps** → (top-right) **Install via
+YAML** → paste `deploy/compose.yaml`'s contents (the edited one, with real
+values - this dialog doesn't accept a separate `.env` file, #36) → install.
 
 The app listens on host port **2285** (port 8000 on this NAS is already in
 use by something else - see the #6/#7 issue comments), mapped from the

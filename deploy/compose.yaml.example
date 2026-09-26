@@ -1,21 +1,25 @@
-# Story Bible - TrueNAS SCALE Custom App.
+# Story Bible - TrueNAS SCALE Custom App template. This file is the
+# generic, tracked-in-git template - DO NOT edit it in place with real
+# values and DO NOT reference this filename directly for a persistent
+# checkout (see deploy/README.md). It exists as:
 #
-# Install: Apps -> Discover Apps -> (top-right) Install via YAML, paste this
-# file's contents into the box, EDIT THE VALUES BELOW IN THAT PASTED TEXT
-# (dataset path, STORYBIBLE_TOKEN, etc. - see deploy/README.md), then
-# install. The image itself is built locally on the NAS by deploy/update.sh,
-# not pulled from a registry - hence pull_policy: never, and why there's no
-# `image:` tag with a registry prefix.
+#   - Something to paste into TrueNAS UI -> Apps -> Discover Apps ->
+#     (top-right) Install via YAML, editing the values below IN THAT
+#     PASTED TEXT (dataset path, STORYBIBLE_TOKEN, etc.) before installing.
+#     That dialog doesn't accept a companion file (#36), hence everything
+#     being inline in environment: below rather than an env_file:.
+#   - The source for a ONE-TIME `cp deploy/compose.yaml.example
+#     deploy/compose.yaml` on a persistent checkout (e.g. for
+#     deploy/update.sh's `git pull`). deploy/compose.yaml is gitignored -
+#     edit real values into THAT copy, never into this template. Keeping
+#     the real file untracked is exactly what fixes #38: a tracked
+#     deploy/compose.yaml with real values edited into it collides with
+#     every future `git pull`, since git won't silently overwrite local
+#     changes to a tracked file - which is what happened there.
 #
-# Deliberately self-contained (no `env_file:` referencing a sibling .env) -
-# "Install via YAML" takes only this pasted text with nothing alongside it,
-# so a relative env_file path doesn't resolve to anything real (#36: it
-# actually looked for /tmp/.env, wherever TrueNAS staged the paste, and
-# failed). Fill in real values directly in the environment: block below -
-# same story whether you're pasting into that dialog or running
-# `docker compose -f deploy/compose.yaml up -d` yourself (e.g. over SSH) -
-# and don't commit a copy of this file with real values in it back to git.
-# .env.example documents what each setting does, for reference.
+# Either way: the image itself is built locally on the NAS by
+# deploy/update.sh, not pulled from a registry - hence pull_policy: never,
+# and why there's no `image:` tag with a registry prefix.
 services:
   storybible:
     image: story-bible:current
