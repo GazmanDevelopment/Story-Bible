@@ -31,9 +31,12 @@ EXPOSE 8000
 # on TrueNAS overrides it with the Synology reverse proxy's LAN IP (#6, #7).
 ENV FORWARDED_ALLOW_IPS=127.0.0.1
 
-# No curl in slim, so check with the stdlib instead.
+# No curl in slim, so check with the stdlib instead. /api/health returns a
+# real 503 (not just 200 with an "ok": false body) when the DB or /data
+# isn't usable (#3), which urlopen raises as HTTPError - caught explicitly
+# here rather than relying on an uncaught exception happening to exit 1.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["python", "-c", "import urllib.request as u, sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"]
+  CMD ["python", "-c", "import sys, urllib.request as u\ntry:\n    sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)\nexcept Exception:\n    sys.exit(1)"]
 
 # SQLite has a single writer - more than one uvicorn worker would just bring
 # back the "database is locked" problem the busy_timeout pragma (#2) exists
