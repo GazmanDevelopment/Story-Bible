@@ -164,6 +164,23 @@ def test_api_responses_are_not_cached():
     r = c.get("/api/health")
     assert r.headers.get("cache-control") == "no-store"
 
+def test_task_pane_files_are_no_cache_not_no_store():
+    """#4: Word/a browser must always revalidate (no-cache) rather than
+    show a stale app.js after a deploy - but no-store (the /api/* policy)
+    would needlessly throw away the cache StaticFiles' ETag support makes
+    cheap to revalidate against."""
+    for path in ("/", "/app.js", "/styles.css"):
+        r = c.get(path)
+        assert r.status_code == 200, path
+        assert r.headers.get("cache-control") == "no-cache", path
+
+def test_static_file_revalidation_is_a_cheap_304():
+    first = c.get("/app.js")
+    etag = first.headers.get("etag")
+    assert etag
+    again = c.get("/app.js", headers={"If-None-Match": etag})
+    assert again.status_code == 304
+
 
 # ----------------------------------------------------- unhandled exceptions
 def test_unhandled_exception_gets_a_controlled_response(monkeypatch):
