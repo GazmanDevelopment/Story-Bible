@@ -51,6 +51,11 @@ class SeriesIn(BaseModel):
     anchor_date: LooseStr = ""
     anchor_label: LooseStr = ""
     character_fields: list[LooseStr] = Field(default_factory=list)
+    # #63: per-series relationship-type suggestions, editable the same way
+    # as character_fields above - the relationship form's type field is
+    # (and always was) free text either way, so this only customizes the
+    # autocomplete list, never restricts what can actually be saved.
+    relationship_types: list[LooseStr] = Field(default_factory=list)
 
 
 class ChapterIn(BaseModel):

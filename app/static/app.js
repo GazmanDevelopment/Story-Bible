@@ -545,7 +545,8 @@ function characterForm(c, isNew) {
       <button type="button" data-act="add-rel">Add</button>
     </div>
     <input id="relNote" placeholder="Note (optional)" style="margin-top:4px">
-    <datalist id="relTypes">${REL_TYPES.map((t) => `<option value="${t}">`).join("")}</datalist>
+    <datalist id="relTypes">${(S.b.series.relationship_types?.length ? S.b.series.relationship_types : REL_TYPES)
+      .map((t) => `<option value="${esc(t)}">`).join("")}</datalist>
     <div class="hint">Reads as: <b>${esc(c.name)}</b> [type] [who]</div>
     <h3>Appears in timeline</h3>
     ${evs.map((e) => { const a = ageAt(c, e); return `<div class="rel"><div><span class="when">${esc(whenLabel(e))}</span> ${esc(e.title)}${a !== null ? ` <span class="note">(age ${a})</span>` : ""}</div></div>`; }).join("") || `<div class="hint">Not in any events yet.</div>`}`}
@@ -719,6 +720,9 @@ function seriesForm() {
     <h3>Default character fields</h3>
     <textarea data-f="character_fields" rows="6">${esc((s.character_fields || []).join("\n"))}</textarea>
     <div class="hint">One per line. These appear on every character in this series.</div>
+    <h3>Relationship type suggestions</h3>
+    <textarea data-f="relationship_types" rows="6">${esc((s.relationship_types || []).join("\n"))}</textarea>
+    <div class="hint">One per line. Suggested while typing a relationship's type (#63) - you can always type something else too.</div>
     <div class="formbar"><div><button type="button" class="danger" data-act="delete-series">Delete series</button></div>
       <div><button class="primary" data-act="save" data-kind="series">Save</button></div></div>
   </form>
@@ -766,6 +770,7 @@ function readForm(form) {
   if (form.dataset.kind === "characters") data.custom = custom;
   if (form.dataset.kind === "series") {
     data.character_fields = data.character_fields.split("\n").map((x) => x.trim()).filter(Boolean);
+    data.relationship_types = data.relationship_types.split("\n").map((x) => x.trim()).filter(Boolean);
   }
   if (form.dataset.kind === "events") ["off_y", "off_m", "off_d"].forEach((k) => { data[k] = Number(data[k]) || 0; });
   return data;
@@ -865,7 +870,7 @@ async function refreshKeepForm() {
 
 async function newSeries() {
   const s = await api("/series", "POST", { data: { name: "New series", anchor_mode: "relative",
-    anchor_label: "Story start", character_fields: DEFAULT_FIELDS } });
+    anchor_label: "Story start", character_fields: DEFAULT_FIELDS, relationship_types: REL_TYPES } });
   await loadSeriesList(); S.tab = "series"; await selectSeries(s.id); toast("Series created — name it here");
 }
 
