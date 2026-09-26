@@ -722,7 +722,7 @@ function seriesForm() {
     <div class="hint">One per line. These appear on every character in this series.</div>
     <h3>Relationship type suggestions</h3>
     <textarea data-f="relationship_types" rows="6">${esc((s.relationship_types || []).join("\n"))}</textarea>
-    <div class="hint">One per line. Suggested while typing a relationship's type (#63) - you can always type something else too.</div>
+    <div class="hint">One per line. Suggested while typing a relationship's type - you can always type something else too.</div>
     <div class="formbar"><div><button type="button" class="danger" data-act="delete-series">Delete series</button></div>
       <div><button class="primary" data-act="save" data-kind="series">Save</button></div></div>
   </form>
