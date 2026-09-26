@@ -50,6 +50,10 @@ services:
       ENTRA_TENANT_ID: ""
       ENTRA_CLIENT_ID: ""
       ALLOWED_OIDS: ""
+      # The pane's "Log Issue"/"Log Suggestion" buttons (#22) - a
+      # fine-grained GitHub PAT, scoped to just this repo, Issues: write
+      # only. Blank means filing returns 503 rather than crashing.
+      GITHUB_FEEDBACK_TOKEN: ""
       # The Synology reverse proxy's LAN IP - blank trusts nothing (127.0.0.1 default).
       FORWARDED_ALLOW_IPS: ""
       # Backup schedule/monitoring (#5/#17) and log timestamps.

@@ -7,6 +7,7 @@ which does need it - not duplicated here. The real deploy/compose.yaml
 there's nothing for tests to read there; everything here checks the
 tracked .example template instead.
 """
+import os
 import re
 import shutil
 import subprocess
@@ -38,9 +39,11 @@ def test_env_example_has_no_populated_secrets():
 
 def test_env_example_documents_every_env_var_the_app_reads():
     """Cross-references .env.example against the actual os.environ reads in
-    app/main.py and app/backup.py, so a new setting added to the code can't
-    silently go undocumented here."""
-    code = (ROOT / "app" / "main.py").read_text() + (ROOT / "app" / "backup.py").read_text()
+    every app/ module, so a new setting added to the code can't silently go
+    undocumented here (this exact gap - GITHUB_FEEDBACK_TOKEN missing from
+    here despite this test's existence, because it only scanned main.py and
+    backup.py - shipped once; scan every module now, not a hardcoded list)."""
+    code = "".join((ROOT / "app" / f).read_text() for f in os.listdir(ROOT / "app") if f.endswith(".py"))
     used = set(re.findall(r'os\.environ\.get\(["\']([A-Z_]+)["\']', code))
     used |= set(re.findall(r'os\.environ\[["\']([A-Z_]+)["\']\]', code))
     documented = set(re.findall(r"^#?\s*([A-Z_]+)=", (ROOT / ".env.example").read_text(), re.MULTILINE))
@@ -74,7 +77,8 @@ def test_compose_yaml_has_no_real_secrets_or_identifiers():
     string would instead report "auth": true while actually being a value
     anyone who has seen this public repo could authenticate with."""
     text = (ROOT / "deploy" / "compose.yaml.example").read_text()
-    for key in ("STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS", "FORWARDED_ALLOW_IPS"):
+    for key in ("STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS",
+                "FORWARDED_ALLOW_IPS", "GITHUB_FEEDBACK_TOKEN"):
         assert re.search(rf'^\s*{key}: ""\s*$', text, re.MULTILINE), f'{key} is not blank ("") in compose.yaml.example'
 
 @pytest.mark.parametrize("path", ["deploy/compose.yaml", "deploy/compose.yaml.bak"])
