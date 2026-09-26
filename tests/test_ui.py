@@ -208,3 +208,133 @@ def test_task_pane_walkthrough(server, word):
             browser.close()
 
     assert not errors, errors
+
+
+@pytest.fixture
+def browser_page():
+    """A single browser page for tests that don't need the full web/word
+    walkthrough - just one plain-browser-tab session against `server`."""
+    errors: list[str] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            pg = browser.new_page(viewport={"width": 360, "height": 780})
+            pg.on("pageerror", lambda e: errors.append(str(e)))
+            pg.on("console", lambda m: m.type == "error" and errors.append(m.text))
+            pg.route("**/office.js", lambda route: route.fulfill(body="", content_type="application/javascript"))
+            yield pg, errors
+        finally:
+            browser.close()
+
+
+def test_save_conflict_offers_reload_or_keep_mine(server, browser_page):
+    """#58: a 409 (someone else saved first) must show a real reload/keep-
+    mine choice, never overwrite silently, and never leave the user's own
+    edit stuck in a modal-shaped hole."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+
+    # Simulate another client saving first (bumping the version server-side)
+    # via a direct fetch from within the page - no second browser needed to
+    # create a real race.
+    pg.evaluate("""
+        async () => {
+            const id = S.view.id;
+            const current = rec('characters', id);
+            await fetch(`/api/series/${S.sid}/characters/${id}`, {
+                method: 'PUT', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ data: { ...current, role: 'Changed elsewhere' }, version: current.version }),
+            });
+        }
+    """)
+
+    pg.fill("[data-f=role]", "My local edit")
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")
+    assert "Changed by" in pg.inner_text("#modalMessage")
+
+    # Keep mine: modal closes, the edit is untouched, nothing was overwritten.
+    pg.click("[data-act=modal-cancel]")
+    pg.wait_for_selector("#modalOverlay", state="hidden")
+    assert pg.input_value("[data-f=role]") == "My local edit"
+
+    # Saving again with the same stale version conflicts again - there's no
+    # back door that quietly force-overwrites on a second try.
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")
+    pg.click("[data-act=modal-confirm]")  # Reload this time
+    pg.wait_for_selector("#modalOverlay", state="hidden")
+    assert pg.input_value("[data-f=role]") == "Changed elsewhere"
+
+    # Chromium logs its own "Failed to load resource: ...409" console error
+    # for each conflict response above - that's expected noise from this
+    # test's own setup, not a bug, so it's the one thing we filter out here.
+    unexpected = [e for e in errors if "409" not in e]
+    assert not unexpected, unexpected
+
+
+def test_unsaved_changes_guard_on_cancel_and_tab_switch(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+
+    # No edit made - Back navigates immediately, no prompt.
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    pg.click("[data-act=cancel]")
+    pg.wait_for_selector(".list li")
+
+    # Edit, then try to leave via Back - guarded.
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    pg.fill("[data-f=role]", "Unsaved edit")
+    pg.click("[data-act=cancel]")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")
+
+    # Cancel the prompt itself - stay put, edit still there.
+    pg.click("[data-act=modal-cancel]")
+    pg.wait_for_selector("#modalOverlay", state="hidden")
+    assert pg.is_visible("form[data-kind=characters]")
+    assert pg.input_value("[data-f=role]") == "Unsaved edit"
+
+    # Same guard on switching tabs, this time actually discarding.
+    pg.click("#tabs >> text=Places")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")
+    pg.click("[data-act=modal-confirm]")
+    pg.wait_for_selector(".list li")
+    assert "The Lake House" in pg.inner_text("main")
+
+
+def test_unsaved_changes_guard_covers_series_settings_tab(server, browser_page):
+    """#58 follow-up: the Series tab is a top-level tab (S.view stays null
+    there), not a record "view" like Characters/Places/etc - a first pass at
+    the guard only snapshotted forms rendered while S.view was set, so an
+    edit to the series name and a tab switch away silently lost it."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    pg.fill("[data-f=name]", "Renamed series")
+    pg.click("#tabs >> text=Characters")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")
+
+    # Cancel the prompt - stay on Series, edit still there.
+    pg.click("[data-act=modal-cancel]")
+    pg.wait_for_selector("#modalOverlay", state="hidden")
+    assert pg.is_visible("form[data-kind=series]")
+    assert pg.input_value("[data-f=name]") == "Renamed series"
+
+    # Confirm this time - discards the edit and switches tabs.
+    pg.click("#tabs >> text=Characters")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")
+    pg.click("[data-act=modal-confirm]")
+    pg.wait_for_selector(".list li")
+
+    assert not errors, errors
+
+    assert not errors, errors

@@ -34,6 +34,18 @@
   </header>
   <main id="main"></main>
   <div id="toast"></div>
+  <!-- #58: a small in-page confirm modal, reused for the unsaved-changes
+       guard and the save-conflict prompt - see styles.css for why not
+       window.confirm(). -->
+  <div id="modalOverlay" class="modal-overlay" hidden>
+    <div class="modal">
+      <p id="modalMessage"></p>
+      <div class="modal-actions">
+        <button data-act="modal-cancel">Cancel</button>
+        <button class="primary" id="modalConfirmBtn" data-act="modal-confirm">OK</button>
+      </div>
+    </div>
+  </div>
   <script src="app.js"></script>
 </body>
 </html>

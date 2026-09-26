@@ -15,6 +15,7 @@ const S = {
   rsSort: "date_desc",  // research list: date_desc | date_asc | title
   docLink: null,      // {series_id, chapter_id} stored in the Word document
   config: null,       // {authMode, tenantId, clientId} from GET /api/config (#13)
+  formSnapshot: null, // JSON of the open form's fields right after rendering - unsaved-changes guard (#58)
 };
 
 // MSAL state (#13) - not on S since it holds live library objects, not
@@ -37,11 +38,16 @@ const byName = (a, b) => (a.name || a.title || "").localeCompare(b.name || b.tit
 function lsGet(k, d = "") { try { return localStorage.getItem(k) ?? d; } catch { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
 
-function toast(msg) {
-  const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+function toast(msg, type = "info") {
+  const t = $("#toast"); t.textContent = msg;
+  t.className = type === "error" ? "show error" : "show";
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 1800);
 }
 
+// #58: every thrown error from here carries `.status` (when it's an HTTP
+// response, not a network failure) and, for a 409, `.detail` (the raw
+// conflict payload - {error, current, updated_by} - so a caller can build
+// a real reload/keep-mine prompt instead of just reading the message).
 async function api(path, method = "GET", body) {
   const headers = { "Content-Type": "application/json" };
   if (S.config?.authMode === "entra") {
@@ -50,28 +56,63 @@ async function api(path, method = "GET", body) {
   } else {
     const tok = lsGet("sb_token"); if (tok) headers["X-Token"] = tok;
   }
-  const res = await fetch("/api" + path, { method, headers,
-    body: body === undefined ? undefined : JSON.stringify(body) });
+  let res;
+  try {
+    res = await fetch("/api" + path, { method, headers,
+      body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch {
+    // fetch() itself throws (offline, DNS, connection refused) rather than
+    // resolving with a response - a raw "Failed to fetch" isn't useful.
+    throw new Error("Can't reach the server - check your connection and try again");
+  }
   if (!res.ok) {
     if (res.status === 401) {
-      throw new Error(S.config?.authMode === "entra" ? "Signed out - sign in again" : "Needs API token (Series tab → Connection)");
+      // A stale/expired token in entra mode: the header's cached account
+      // no longer gets one, so drop it and let renderHeader() show Sign in
+      // again immediately rather than leaving no way back in but a reload.
+      if (S.config?.authMode === "entra") { msalAccount = null; renderHeader(); }
+      const err = new Error(S.config?.authMode === "entra" ? "Signed out - sign in again" : "Needs API token (Series tab → Connection)");
+      err.status = 401;
+      throw err;
     }
     const txt = await res.text();
-    // #12: 409/428 (and 400s from Pydantic) carry a structured `detail`
+    // #12/#58: 409/428 (and 400s from Pydantic) carry a structured `detail`
     // rather than a plain string - surface something readable instead of
-    // the raw JSON blob. Full conflict-resolution UI (reload/keep-mine) is
-    // #14, not this - this is just "don't show garbage in the toast".
+    // the raw JSON blob.
     let message = txt;
+    let detail;
     try {
-      const detail = JSON.parse(txt).detail;
-      if (typeof detail === "string") message = detail;
-      else if (res.status === 409 && detail?.error === "conflict") {
-        message = `Changed by ${detail.updated_by || "someone else"} since you loaded it - reload and try again`;
+      detail = JSON.parse(txt).detail;
+      if (typeof detail === "string") {
+        message = res.status === 403 ? `You don't have access: ${detail}` : detail;
+      } else if (res.status === 409 && detail?.error === "conflict") {
+        message = `Changed by ${detail.updated_by || "someone else"} since you loaded it`;
       }
     } catch { /* not JSON - fall back to the raw text above */ }
-    throw new Error(message);
+    const err = new Error(message);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
   }
   return res.json();
+}
+
+// ----------------------------------------------------------- confirm modal
+// Resolves true for the primary ("confirm") button, false for Cancel.
+let _modalResolve = null;
+function showModal(message, confirmLabel) {
+  return new Promise((resolve) => {
+    _modalResolve?.(false); // an unresolved prior modal would otherwise hang forever
+    _modalResolve = resolve;
+    $("#modalMessage").textContent = message;
+    $("#modalConfirmBtn").textContent = confirmLabel;
+    $("#modalOverlay").hidden = false;
+  });
+}
+function closeModal(result) {
+  $("#modalOverlay").hidden = true;
+  const resolve = _modalResolve; _modalResolve = null;
+  resolve?.(result);
 }
 const rec = (kind, id) => (S.b?.[kind] || []).find((r) => r.id === id);
 const charName = (id) => rec("characters", id)?.name || "?";
@@ -186,7 +227,7 @@ async function signIn() {
       await signInViaDialog();
     }
   } catch (err) {
-    toast("Sign-in failed: " + err.message);
+    toast("Sign-in failed: " + err.message, "error");
   }
 }
 
@@ -298,8 +339,9 @@ function render() {
   // doesn't need a series to exist (it isn't tied to S.b at all), and if
   // it were gated behind having one, a user hitting a bug that prevents
   // creating their first series could never report that exact bug.
-  if (S.view?.kind === "feedback") { m.innerHTML = renderForm(); return; }
+  if (S.view?.kind === "feedback") { m.innerHTML = renderForm(); captureFormSnapshot(); return; }
   if (!S.b) {
+    S.formSnapshot = null;
     m.innerHTML = `<div class="empty">Create a series to get started.<br><br>
       <button class="primary" data-act="new-series">+ New series</button>
       <div class="toolbar" style="margin-top:12px;justify-content:center">
@@ -311,10 +353,31 @@ function render() {
   if (S.view) {
     m.innerHTML = renderForm();
     if (S.view.kind === "research") initResearchEditor(S.view.id ? rec("research", S.view.id) : {});
+    captureFormSnapshot();
     return;
   }
   m.innerHTML = ({ characters: listCharacters, locations: listLocations,
     events: listEvents, research: listResearch, series: seriesForm })[S.tab]();
+  captureFormSnapshot();
+}
+
+// #58: unsaved-changes guard. Snapshotting the form right after it's
+// rendered (rather than diffing against the server record) naturally
+// covers fields the form pre-fills with defaults a new record doesn't
+// have yet (e.g. Research's date_entered defaults to today) - only what
+// the user actually changes afterwards counts as dirty.
+function captureFormSnapshot() {
+  const form = $("main form");
+  S.formSnapshot = form ? JSON.stringify(readForm(form)) : null;
+}
+function isDirty() {
+  const form = $("main form");
+  if (!form || S.formSnapshot == null) return false;
+  return JSON.stringify(readForm(form)) !== S.formSnapshot;
+}
+async function confirmDiscard() {
+  if (!isDirty()) return true;
+  return showModal("You have unsaved changes. Discard them?", "Discard");
 }
 
 function toolbar(kind, placeholder, extra = "") {
@@ -724,8 +787,10 @@ async function onClick(ev) {
     switch (act) {
       case "open": S.view = { kind: t.dataset.kind, id: t.dataset.id }; render(); window.scrollTo(0, 0); break;
       case "new": S.view = { kind: t.dataset.kind, id: null }; render(); break;
-      case "cancel": S.view = null; render(); break;
+      case "cancel": if (!(await confirmDiscard())) return; S.view = null; render(); break;
       case "chip": t.classList.toggle("on"); break;
+      case "modal-cancel": closeModal(false); break;
+      case "modal-confirm": closeModal(true); break;
       case "new-series": await newSeries(); break;
       case "save": await save(t.dataset.kind, t.closest("form")); break;
       case "delete": {
@@ -791,7 +856,7 @@ async function onClick(ev) {
         break;
       }
     }
-  } catch (err) { toast(err.message); console.error(err); }
+  } catch (err) { toast(err.message, "error"); console.error(err); }
 }
 
 async function refreshKeepForm() {
@@ -804,13 +869,29 @@ async function newSeries() {
   await loadSeriesList(); S.tab = "series"; await selectSeries(s.id); toast("Series created — name it here");
 }
 
+// #58: on a 409, offer the real choice rather than just a toast - Reload
+// (the response already carries the current record, so this is free: no
+// second round trip) or Keep mine, which does nothing further and leaves
+// the form exactly as the user left it. There's no third "force overwrite"
+// option: saving again while still holding the stale version just 409s
+// again, which is deliberate - "never overwrite silently" (#14/#58).
+async function handleSaveConflict(err, applyCurrent) {
+  if (await showModal(err.message, "Reload")) { await applyCurrent(err.detail.current); render(); }
+}
+
 async function save(kind, form) {
   const data = readForm(form);
   if (kind === "series") {
     // #12: PUT must send back the version this was loaded at, so a save
     // from a stale copy (someone else changed it meanwhile) 409s instead
     // of silently overwriting their edit.
-    await api(`/series/${S.sid}`, "PUT", { data: { ...S.b.series, ...data }, version: S.b.series.version });
+    try {
+      await api(`/series/${S.sid}`, "PUT", { data: { ...S.b.series, ...data }, version: S.b.series.version });
+    } catch (err) {
+      if (err.status !== 409) throw err;
+      await handleSaveConflict(err, async (current) => { S.b.series = current; await loadSeriesList(); });
+      return;
+    }
     await loadSeriesList(); await loadBundle(); render(); toast("Saved"); return;
   }
   if ((kind === "characters" || kind === "locations") && !data.name?.trim()) { toast("Name is required"); return; }
@@ -819,7 +900,16 @@ async function save(kind, form) {
   }
   if (S.view.id) {
     const prev = rec(kind, S.view.id);
-    await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data }, version: prev.version });
+    try {
+      await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data }, version: prev.version });
+    } catch (err) {
+      if (err.status !== 409) throw err;
+      await handleSaveConflict(err, (current) => {
+        const idx = S.b[kind].findIndex((r) => r.id === S.view.id);
+        if (idx >= 0) S.b[kind][idx] = current;
+      });
+      return;
+    }
     await refreshKeepForm();
   } else {
     const r = await api(`/series/${S.sid}/${kind}`, "POST", { data });
@@ -854,7 +944,9 @@ function wire() {
   document.addEventListener("change", async (e) => {
     const t = e.target;
     if (t.id === "seriesSelect") {
-      if (t.value === "__new") await newSeries(); else await selectSeries(t.value);
+      const next = t.value;
+      if (!(await confirmDiscard())) { t.value = S.sid || ""; return; }
+      if (next === "__new") await newSeries(); else await selectSeries(next);
     }
     if (t.dataset.act === "tl-chapter") { S.tlChapter = t.value; render(); }
     if (t.dataset.act === "tl-char") { S.tlChar = t.value; render(); }
@@ -864,13 +956,14 @@ function wire() {
       try {
         const r = await api("/import", "POST", JSON.parse(await t.files[0].text()));
         await loadSeriesList(); await selectSeries(r.id); toast("Imported");
-      } catch (err) { toast("Import failed: " + err.message); }
+      } catch (err) { toast("Import failed: " + err.message, "error"); }
     }
   });
-  document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", async () => {
+    if (!(await confirmDiscard())) return;
     S.tab = b.dataset.tab; S.view = null; S.filter = ""; render();
   }));
-  $("#btnFind").addEventListener("click", () => findSelection().catch((e) => toast(e.message)));
+  $("#btnFind").addEventListener("click", () => findSelection().catch((e) => toast(e.message, "error")));
 }
 
 async function loadApp() {
