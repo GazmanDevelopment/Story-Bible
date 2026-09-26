@@ -151,10 +151,13 @@ async function initAuth() {
     cache: { cacheLocation: "localStorage" },  // survives the task pane closing/reopening with a document
   };
   try {
-    msalPca = (!S.inWord || naaSupported())
-      ? await msal.createNestablePublicClientApplication(msalConfig)
-      : new msal.PublicClientApplication(msalConfig);
-    if (!(!S.inWord || naaSupported())) await msalPca.initialize();
+    const useNaa = !S.inWord || naaSupported();
+    if (useNaa) {
+      msalPca = await msal.createNestablePublicClientApplication(msalConfig);
+    } else {
+      msalPca = new msal.PublicClientApplication(msalConfig);
+      await msalPca.initialize();
+    }
     const accounts = msalPca.getAllAccounts();
     if (accounts.length) msalAccount = accounts[0];
   } catch (err) {
@@ -208,6 +211,13 @@ function signInViaDialog() {
           if (!msg.ok) { reject(new Error(msg.error || "Sign-in failed")); return; }
           msalAccount = msalPca.getAllAccounts()[0] || null;
           resolve();
+        });
+        // The user closing the dialog (or Entra sign-in erroring out before
+        // messageParent ever runs) fires this instead of DialogMessageReceived -
+        // without handling it too, the promise above never settles and the
+        // Sign in button just looks permanently stuck on that attempt.
+        dialog.addEventHandler(Office.EventType.DialogEventReceived, () => {
+          reject(new Error("Sign-in cancelled"));
         });
       },
     );

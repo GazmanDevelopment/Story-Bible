@@ -233,6 +233,14 @@ def get_current_user(
     except auth.AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     if not user.is_pipeline:
+        # A second connection beyond the one the route handler itself opens
+        # right after - each `with db() as con:` block is already its own
+        # connection throughout this file (no pooling), so this doubles
+        # SQLite connection setup for every entra-mode request. Not worth
+        # threading a shared, request-scoped connection through every route
+        # to save on local-file connect() calls this app's actual scale
+        # (a single writer, PLAN.md) makes negligible - see #12's PR
+        # discussion if usage ever grows enough to matter.
         with db() as con:
             is_new = upsert_user(con, user)
             if is_new:

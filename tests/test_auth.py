@@ -242,3 +242,22 @@ def test_entra_mode_without_tenant_or_client_id_raises():
     finally:
         del os.environ["AUTH_MODE"]
         importlib.reload(auth)
+
+
+def test_token_mode_without_a_token_raises():
+    """A blank STORYBIBLE_TOKEN under AUTH_MODE=token would otherwise make
+    `if auth.TOKEN and x_token != auth.TOKEN` in main.py's get_current_user
+    vacuously false - silently accepting every request as authenticated
+    while /api/health and /api/config both report auth as "on"."""
+    import importlib
+    import os
+    old_token = os.environ.pop("STORYBIBLE_TOKEN", None)
+    os.environ["AUTH_MODE"] = "token"
+    try:
+        with pytest.raises(RuntimeError):
+            importlib.reload(auth)
+    finally:
+        del os.environ["AUTH_MODE"]
+        if old_token is not None:
+            os.environ["STORYBIBLE_TOKEN"] = old_token
+        importlib.reload(auth)

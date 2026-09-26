@@ -44,7 +44,12 @@ def _safe_href(value: str) -> str | None:
         scheme = urlparse(value).scheme.lower()
     except ValueError:
         return None
-    if scheme and scheme not in _SAFE_LINK_SCHEMES:
+    # Always require an explicit safe scheme, not just "absent or safe" -
+    # urlparse gives an empty scheme for a protocol-relative URL
+    # ("//evil.example.com/x") too, which a browser resolves against the
+    # page's own scheme just like an absolute URL would, so leaving that
+    # case unfiltered would defeat this allowlist entirely.
+    if scheme not in _SAFE_LINK_SCHEMES:
         return None
     return value
 

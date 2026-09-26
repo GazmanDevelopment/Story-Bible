@@ -44,6 +44,12 @@ if AUTH_MODE not in ("none", "token", "entra"):
     raise RuntimeError(f"AUTH_MODE must be 'none', 'token' or 'entra', got {AUTH_MODE!r}")
 if AUTH_MODE == "entra" and not (ENTRA_TENANT_ID and ENTRA_CLIENT_ID):
     raise RuntimeError("AUTH_MODE=entra requires ENTRA_TENANT_ID and ENTRA_CLIENT_ID")
+if AUTH_MODE == "token" and not TOKEN:
+    # Otherwise `if auth.TOKEN and x_token != auth.TOKEN` in main.py's
+    # get_current_user is vacuously false for every request - AUTH_MODE=
+    # token with a blank STORYBIBLE_TOKEN would silently accept everyone
+    # while /api/health and /api/config both report auth as "on".
+    raise RuntimeError("AUTH_MODE=token requires STORYBIBLE_TOKEN to be set")
 
 PIPELINE_ROLE = "Pipeline.Read"
 USER_SCOPE = "access_as_user"
