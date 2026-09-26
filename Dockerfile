@@ -15,6 +15,14 @@ RUN python -m pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+# Docker's COPY preserves the *source* file's permission bits from the
+# build context, not just its content - if whatever cloned/pulled this
+# repo on the build host did so with a restrictive umask (a real bug on
+# an actual TrueNAS deploy, not a hypothetical: PermissionError reading
+# app/__init__.py at startup, from the non-root user below), the app code
+# ends up unreadable regardless of who owns it. Force a known-good mode
+# so this can't happen again, whatever the build host's umask is.
+RUN chmod -R a+rX /app
 
 # Where the SQLite file (and later, backups - #5) live; see STORYBIBLE_DB in
 # app/main.py. Chowned here so a plain `docker run -v vol:/data` (no explicit

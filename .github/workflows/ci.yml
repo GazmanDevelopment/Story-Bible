@@ -57,6 +57,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Simulate a restrictive build-host umask (regression guard, #40)
+        # A real TrueNAS deploy failed at container startup with
+        # PermissionError reading app/__init__.py: `sudo git clone`/`pull`
+        # there used a restrictive umask, and Docker's COPY preserves the
+        # *source* file's mode bits, not just its content - GitHub Actions'
+        # own checkout uses a normal umask, so this job wouldn't otherwise
+        # exercise the exact scenario that broke. Reproduces a umask-077
+        # checkout (files 600, dirs 700 - owner/root can still read them,
+        # which is why `docker build` itself succeeded on the real box too;
+        # only the non-root runtime user couldn't) before building, so a
+        # regression is caught here instead of on a real deploy again.
+        run: |
+          find app -type f -exec chmod 600 {} +
+          find app -type d -exec chmod 700 {} +
+
       - name: Build image
         run: docker build -t story-bible:ci .
 
