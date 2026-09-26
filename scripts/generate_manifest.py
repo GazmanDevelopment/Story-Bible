@@ -73,6 +73,16 @@ def generate(env: str) -> Path:
     xml = xml.replace("{{APP_DOMAINS}}", domains)
     out = ROOT / f"manifest.{env}.xml"
     out.write_text(xml)
+    if env == "prod":
+        # #61: also publish prod's manifest via GitHub Pages, so it's a
+        # stable download for sideloading onto a new laptop (Word -> Insert
+        # -> Add-ins -> More Add-ins -> My Add-ins -> Upload My Add-in)
+        # without a network-share Trusted Add-in Catalog each time - see
+        # docs/index.html for the actual steps. dev's manifest points at
+        # localhost, so it's never published here.
+        pages_copy = ROOT / "docs" / "manifest.xml"
+        pages_copy.parent.mkdir(parents=True, exist_ok=True)
+        pages_copy.write_text(xml)
     return out
 
 

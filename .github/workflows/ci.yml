@@ -45,13 +45,14 @@ jobs:
         with:
           node-version: 22
 
-      - name: Manifests match the template, and validate (#8)
+      - name: Manifests match the template, and validate (#8, #61)
         run: |
           python scripts/generate_manifest.py
-          # Fails if committed manifest.dev.xml/manifest.prod.xml don't
-          # exactly match what the template+script would produce right now
-          # - i.e. someone hand-edited the output instead of the template.
-          git diff --exit-code manifest.dev.xml manifest.prod.xml
+          # Fails if committed manifest.dev.xml/manifest.prod.xml, or the
+          # GitHub Pages copy at docs/manifest.xml (#61), don't exactly
+          # match what the template+script would produce right now - i.e.
+          # someone hand-edited the output instead of the template.
+          git diff --exit-code manifest.dev.xml manifest.prod.xml docs/manifest.xml
           npx --yes office-addin-manifest validate manifest.dev.xml
           npx --yes office-addin-manifest validate manifest.prod.xml
 
