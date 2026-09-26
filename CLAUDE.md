@@ -32,3 +32,7 @@ deployment/secrets handling.
 **Everything goes through a PR**, even for the repo owner - see the branch
 protection notes in issue #19. Work on a feature branch, push it, open a PR,
 wait for CI to pass, then merge.
+
+**User-facing text.** Do not add the GH issue # on the user interface - issue
+numbers belong in code comments, commit messages and PR descriptions, not in
+anything an end user sees (hints, labels, tooltips, placeholders, toasts).
