@@ -12,6 +12,7 @@ const S = {
   view: null,         // {kind, id} when editing a record, else null (list)
   filter: "",
   tlChapter: "", tlChar: "",
+  rsSort: "date_desc",  // research list: date_desc | date_asc | title
   docLink: null,      // {series_id, chapter_id} stored in the Word document
 };
 
@@ -170,9 +171,13 @@ function render() {
       </div></div>`;
     return;
   }
-  if (S.view) { m.innerHTML = renderForm(); return; }
+  if (S.view) {
+    m.innerHTML = renderForm();
+    if (S.view.kind === "research") initResearchEditor(S.view.id ? rec("research", S.view.id) : {});
+    return;
+  }
   m.innerHTML = ({ characters: listCharacters, locations: listLocations,
-    events: listEvents, series: seriesForm })[S.tab]();
+    events: listEvents, research: listResearch, series: seriesForm })[S.tab]();
 }
 
 function toolbar(kind, placeholder, extra = "") {
@@ -235,6 +240,38 @@ function listEvents() {
       : `<div class="empty">No events yet.</div>`);
 }
 
+function todayIso() { return new Date().toISOString().slice(0, 10); }
+function textPreview(html, max = 140) {
+  // <template>.content is an inert DocumentFragment - unlike a plain <div>,
+  // setting innerHTML here never fetches/decodes any <img> the body has,
+  // even briefly, since it's never part of the render tree.
+  const tpl = document.createElement("template"); tpl.innerHTML = html || "";
+  const t = (tpl.content.textContent || "").replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+function listResearch() {
+  const sortOpts = [["date_desc", "Newest first"], ["date_asc", "Oldest first"], ["title", "Title A–Z"]]
+    .map(([v, label]) => `<option value="${v}" ${S.rsSort === v ? "selected" : ""}>${label}</option>`).join("");
+  const items = S.b.research.filter(matches).sort((a, b) => {
+    if (S.rsSort === "title") return (a.title || "").localeCompare(b.title || "");
+    const cmp = (a.date_entered || "").localeCompare(b.date_entered || "");
+    return S.rsSort === "date_asc" ? cmp : -cmp;
+  });
+  return toolbar("research", "Search research…", `<select data-act="research-sort">${sortOpts}</select>`) +
+    (items.length ? `<ul class="list">${items.map((r) => {
+      const links = [rec("chapters", r.chapter_id) && "Ch " + rec("chapters", r.chapter_id).number,
+        ...(r.character_ids || []).map(charName),
+        ...(r.location_ids || []).map((id) => rec("locations", id)?.name),
+        ...(r.event_ids || []).map((id) => rec("events", id)?.title)].filter(Boolean);
+      return `<li data-act="open" data-kind="research" data-id="${r.id}">
+        <div class="title">${esc(r.title)} ${r.date_entered ? `<span class="sub">· ${esc(r.date_entered)}</span>` : ""}</div>
+        <div class="sub">${esc(textPreview(r.body))}</div>
+        ${links.length ? `<div class="sub">${esc(links.join(" · "))}</div>` : ""}
+      </li>`; }).join("")}</ul>`
+      : `<div class="empty">No research entries yet.</div>`);
+}
+
 // relationships
 function relsFor(cid) {
   return S.b.relationships.filter((r) => r.from === cid || r.to === cid);
@@ -266,6 +303,7 @@ function renderForm() {
   if (kind === "characters") return back + characterForm(r, !id);
   if (kind === "locations") return back + locationForm(r, !id);
   if (kind === "events") return back + eventForm(r, !id);
+  if (kind === "research") return back + researchForm(r, !id);
   if (kind === "feedback") return back + feedbackForm(S.view.feedbackKind);
   return "";
 }
@@ -351,6 +389,118 @@ function eventForm(e, isNew) {
     ${field("description", "Details", e.description, "textarea", 'rows="4"')}
     ${formBar("events", isNew)}
   </form>`;
+}
+
+function researchForm(r, isNew) {
+  const chOpts = `<option value="">(no chapter)</option>` + [...S.b.chapters].sort((a, b) => (a.number || 0) - (b.number || 0))
+    .map((c) => `<option value="${c.id}" ${r.chapter_id === c.id ? "selected" : ""}>Ch ${esc(c.number)} – ${esc(c.title)}</option>`).join("");
+  return `<form data-kind="research">
+    <h2>${isNew ? "New research entry" : esc(r.title)}</h2>
+    <div class="grid2">${field("title", "Title", r.title, "text", "", true)}
+      ${field("date_entered", "Date entered", isNew ? todayIso() : r.date_entered, "date")}</div>
+    <label><span>Chapter</span><select data-f="chapter_id">${chOpts}</select></label>
+    <h3>Notes</h3>
+    <div id="researchEditor"></div>
+    <textarea data-f="body" hidden>${esc(r.body || "")}</textarea>
+    <div class="hint">Images are resized automatically when added.</div>
+    <h3>Linked characters</h3>
+    ${chipPicker("character_ids", [...S.b.characters].sort(byName), r.character_ids || [])}
+    <h3>Linked places</h3>
+    ${chipPicker("location_ids", [...S.b.locations].sort(byName), r.location_ids || [])}
+    <h3>Linked timeline events</h3>
+    ${chipPicker("event_ids", [...S.b.events].sort((a, b) => sortKey(a) - sortKey(b)), r.event_ids || [])}
+    ${formBar("research", isNew)}
+  </form>`;
+}
+
+// ------------------------------------------------------- research WYSIWYG
+// No explicit teardown of a previous Quill instance: the whole form is
+// replaced via innerHTML on every render() (same as every other form in
+// this file), which discards its DOM. Quill has no public destroy() API
+// (see its FAQ) - the one thing that leaks is its document-level
+// selectionchange listener, which is harmless for a single long-lived tab.
+function initResearchEditor(r) {
+  const el = $("#researchEditor"); if (!el) return;
+  const textarea = $('textarea[data-f="body"]');
+  const quill = new Quill(el, {
+    theme: "snow",
+    modules: {
+      toolbar: {
+        container: [["bold", "italic", "underline", "strike"], [{ header: [1, 2, 3, false] }],
+          ["blockquote"], [{ list: "ordered" }, { list: "bullet" }], ["link", "image"], ["clean"]],
+        handlers: { image: quillImageHandler },
+      },
+      // Quill's own paste/drag-drop handling (Clipboard -> Uploader, see
+      // vendor/quill/quill.js) inserts images straight from FileReader with
+      // no resizing or size cap - route it through the same compression as
+      // the toolbar button, or a pasted screenshot skips both entirely.
+      // mimetypes matches what compressImage()/the sanitizer's data-URL
+      // allowlist accept (png/jpeg/gif/webp) - Quill's own default is
+      // narrower (png/jpeg only) and would otherwise silently drop the rest
+      // before the handler below ever runs.
+      uploader: { mimetypes: ["image/png", "image/jpeg", "image/gif", "image/webp"], handler: quillUploadHandler },
+    },
+  });
+  quill.clipboard.dangerouslyPasteHTML(0, r.body || "");
+  quill.on("text-change", () => { textarea.value = quill.root.innerHTML; });
+}
+
+const MAX_IMAGE_DIM = 1600;      // longest edge, px
+const MAX_IMAGE_QUALITY = 0.82;  // JPEG quality
+const MAX_IMAGE_DATA_URL_CHARS = 3_500_000;  // ~2.6MB decoded - keeps a few images well under MAX_BODY_BYTES
+
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Couldn't read the file"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("Not a valid image"));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM) {
+          const scale = MAX_IMAGE_DIM / Math.max(width, height);
+          width = Math.round(width * scale); height = Math.round(height * scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        const isPng = file.type === "image/png";
+        resolve(canvas.toDataURL(isPng ? "image/png" : "image/jpeg", isPng ? undefined : MAX_IMAGE_QUALITY));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function insertCompressedImages(quill, index, files) {
+  for (const file of files) {
+    try {
+      const dataUrl = await compressImage(file);
+      if (dataUrl.length > MAX_IMAGE_DATA_URL_CHARS) { toast("An image was skipped - still too large after resizing"); continue; }
+      quill.insertEmbed(index, "image", dataUrl, "user");
+      index += 1;
+    } catch (err) { toast(err.message); }
+  }
+  quill.setSelection(index);
+}
+
+function quillImageHandler() {
+  const input = document.createElement("input");
+  input.type = "file"; input.accept = "image/*";
+  input.onchange = () => {
+    const file = input.files[0]; if (!file) return;
+    const range = this.quill.getSelection(true) || { index: this.quill.getLength() };
+    insertCompressedImages(this.quill, range.index, [file]);
+  };
+  input.click();
+}
+
+// modules.uploader handler - called by Quill itself on paste/drag-drop of
+// image files (see the comment where this is registered above).
+function quillUploadHandler(range, files) {
+  insertCompressedImages(this.quill, range.index, files);
 }
 
 function seriesForm() {
@@ -521,7 +671,9 @@ async function save(kind, form) {
     await loadSeriesList(); await loadBundle(); render(); toast("Saved"); return;
   }
   if ((kind === "characters" || kind === "locations") && !data.name?.trim()) { toast("Name is required"); return; }
-  if (kind === "events" && !data.title?.trim()) { toast("Say what happens"); return; }
+  if ((kind === "events" || kind === "research") && !data.title?.trim()) {
+    toast(kind === "events" ? "Say what happens" : "Title is required"); return;
+  }
   if (S.view.id) {
     const prev = rec(kind, S.view.id);
     await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data } });
@@ -563,6 +715,7 @@ function wire() {
     }
     if (t.dataset.act === "tl-chapter") { S.tlChapter = t.value; render(); }
     if (t.dataset.act === "tl-char") { S.tlChar = t.value; render(); }
+    if (t.dataset.act === "research-sort") { S.rsSort = t.value; render(); }
     if (t.dataset.act === "doc-chapter") saveDocLink({ series_id: S.sid, chapter_id: t.value });
     if (t.id === "importFile" && t.files[0]) {
       try {
