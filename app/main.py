@@ -8,8 +8,6 @@ are handled by app/migrations.py and applied automatically on startup.
 
 Env vars:
   STORYBIBLE_DB     path to the SQLite file   (default /data/storybible.db)
-  STORYBIBLE_TOKEN  optional shared secret; when set every /api call must
-                    send it in the X-Token header
   MAX_BODY_BYTES    request body size cap, in bytes (default 5 MiB)
   IMPORT_MAX_BODY_BYTES  body size cap for /api/import specifically, in
                     bytes (default 20 MiB) - a whole-series bundle in one
@@ -20,6 +18,18 @@ Env vars:
                     since STORYBIBLE_TOKEN is optional and this whole body
                     is buffered before any auth check runs (see PLAN.md's
                     "LAN/VPN only" guidance for the actual threat model)
+
+Auth (#10, see app/auth.py for the rest of this): AUTH_MODE is "none",
+"token" or "entra" (default: "token" if STORYBIBLE_TOKEN is set, else
+"none" - so an existing deployment that only ever set STORYBIBLE_TOKEN
+keeps behaving exactly as before with no other change required).
+  STORYBIBLE_TOKEN  AUTH_MODE=token's shared secret; every /api call must
+                    send it in the X-Token header
+  ENTRA_TENANT_ID   required for AUTH_MODE=entra
+  ENTRA_CLIENT_ID   required for AUTH_MODE=entra
+  ALLOWED_OIDS      optional comma-separated allowlist of Entra object ids,
+                    defence in depth on top of Entra's own "assignment
+                    required" - unset means don't add this extra check
 
 Nightly backups (VACUUM INTO + a JSON export per series) run in-process -
 see app/backup.py for BACKUP_DIR/BACKUP_KEEP_DAYS/BACKUP_HOUR and the
@@ -48,13 +58,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from . import __version__
+from . import auth
 from . import backup as backup_mod
 from . import github_feedback as feedback_mod
 from .migrations import migrate
 from .models import KIND_MODELS, SeriesIn
 
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
-TOKEN = os.environ.get("STORYBIBLE_TOKEN", "").strip()
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", 5 * 1024 * 1024))
 IMPORT_MAX_BODY_BYTES = int(os.environ.get("IMPORT_MAX_BODY_BYTES", 20 * 1024 * 1024))
 STATIC_DIR = Path(__file__).parent / "static"
@@ -171,9 +181,50 @@ def _sanitize_for_log(s: str) -> str:
 
 
 # ------------------------------------------------------------------------- auth
-def check_token(x_token: str | None = Header(default=None)) -> None:
-    if TOKEN and x_token != TOKEN:
-        raise HTTPException(status_code=401, detail="Bad or missing X-Token")
+def upsert_user(con: sqlite3.Connection, user: auth.CurrentUser) -> bool:
+    """Record/refresh a signed-in person in the `users` table (#10).
+    Returns True the first time this oid is ever seen - the caller uses
+    that to claim any ownerless series for them (#11)."""
+    now = time.time()
+    row = con.execute("SELECT oid FROM users WHERE oid=?", (user.oid,)).fetchone()
+    if row:
+        con.execute(
+            "UPDATE users SET email=?, display_name=?, last_seen=? WHERE oid=?",
+            (user.email, user.display_name, now, user.oid),
+        )
+        return False
+    con.execute(
+        "INSERT INTO users (oid, email, display_name, first_seen, last_seen) VALUES (?,?,?,?,?)",
+        (user.oid, user.email, user.display_name, now, now),
+    )
+    return True
+
+
+def get_current_user(
+    authorization: str | None = Header(default=None),
+    x_token: str | None = Header(default=None),
+) -> auth.CurrentUser:
+    """The one auth dependency every /api/* route (other than /api/health*
+    and /api/config) takes. Behaviour depends entirely on AUTH_MODE, so
+    every existing none/token deployment (and every test written before
+    #10 landed) keeps working unchanged - only AUTH_MODE=entra does real
+    per-person validation."""
+    if auth.AUTH_MODE == "none":
+        return auth.LOCAL_USER
+    if auth.AUTH_MODE == "token":
+        if auth.TOKEN and x_token != auth.TOKEN:
+            raise HTTPException(status_code=401, detail="Bad or missing X-Token")
+        return auth.SHARED_USER
+    # entra
+    try:
+        token = auth.bearer_token(authorization)
+        user = auth.resolve_entra_user(token)
+    except auth.AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    if not user.is_pipeline:
+        with db() as con:
+            upsert_user(con, user)
+    return user
 
 
 # -------------------------------------------------------------------------- app
@@ -281,7 +332,7 @@ def check_kind(kind: str) -> None:
 # ---- health
 @app.get("/api/health")
 def health():
-    body: dict[str, Any] = {"ok": True, "auth": bool(TOKEN), "version": __version__}
+    body: dict[str, Any] = {"ok": True, "auth": auth.AUTH_MODE != "none", "version": __version__}
     if not _db_ok():
         body.update(ok=False, error="database unavailable")
         return JSONResponse(body, status_code=503)
@@ -306,16 +357,35 @@ def health_backup():
     return {"ok": True, "age_seconds": age}
 
 
+# ---- auth (#10)
+@app.get("/api/config")
+def get_config():
+    """Public (no auth) - the pane needs this before it has any way to
+    authenticate, to know *how* to sign in (#13). Only ever the tenant/
+    client id, both already public in the app's own manifest/redirect URIs
+    - nothing here is a secret."""
+    return {
+        "authMode": auth.AUTH_MODE,
+        "tenantId": auth.ENTRA_TENANT_ID,
+        "clientId": auth.ENTRA_CLIENT_ID,
+    }
+
+
+@app.get("/api/me")
+def get_me(user: auth.CurrentUser = Depends(get_current_user)):
+    return {"oid": user.oid, "email": user.email, "displayName": user.display_name, "isPipeline": user.is_pipeline}
+
+
 # ---- series
-@app.get("/api/series", dependencies=[Depends(check_token)])
-def list_series():
+@app.get("/api/series")
+def list_series(user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
         rows = con.execute("SELECT * FROM series").fetchall()
     return sorted((row_to_obj(r) for r in rows), key=lambda s: s.get("name", "").lower())
 
 
-@app.post("/api/series", dependencies=[Depends(check_token)])
-def create_series(body: Body):
+@app.post("/api/series")
+def create_series(body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     sid = new_id()
     data = validate_series(clean(body.data))
     now = time.time()
@@ -324,8 +394,8 @@ def create_series(body: Body):
     return {**data, "id": sid, "updated": now}
 
 
-@app.put("/api/series/{series_id}", dependencies=[Depends(check_token)])
-def update_series(series_id: str, body: Body):
+@app.put("/api/series/{series_id}")
+def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     now = time.time()
     data = validate_series(clean(body.data))
     with db() as con:
@@ -334,16 +404,16 @@ def update_series(series_id: str, body: Body):
     return {**data, "id": series_id, "updated": now}
 
 
-@app.delete("/api/series/{series_id}", dependencies=[Depends(check_token)])
-def delete_series(series_id: str):
+@app.delete("/api/series/{series_id}")
+def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
         get_series_or_404(con, series_id)
         con.execute("DELETE FROM series WHERE id=?", (series_id,))
     return {"deleted": series_id}
 
 
-@app.get("/api/series/{series_id}/bundle", dependencies=[Depends(check_token)])
-def bundle(series_id: str):
+@app.get("/api/series/{series_id}/bundle")
+def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     """Everything for one series in a single call (also used as the export)."""
     with db() as con:
         s = row_to_obj(get_series_or_404(con, series_id))
@@ -354,8 +424,8 @@ def bundle(series_id: str):
     return out
 
 
-@app.post("/api/import", dependencies=[Depends(check_token)])
-def import_bundle(bundle_in: dict[str, Any]):
+@app.post("/api/import")
+def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(get_current_user)):
     """Restore an exported bundle as a NEW series (ids are remapped)."""
     if not isinstance(bundle_in.get("series"), dict):
         raise HTTPException(400, "Not a Story Bible export")
@@ -408,8 +478,8 @@ def import_bundle(bundle_in: dict[str, Any]):
 
 
 # ---- records (chapters / characters / locations / events / relationships)
-@app.get("/api/series/{series_id}/{kind}", dependencies=[Depends(check_token)])
-def list_records(series_id: str, kind: str):
+@app.get("/api/series/{series_id}/{kind}")
+def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
         get_series_or_404(con, series_id)
@@ -419,8 +489,8 @@ def list_records(series_id: str, kind: str):
     return [row_to_obj(r) for r in rows]
 
 
-@app.post("/api/series/{series_id}/{kind}", dependencies=[Depends(check_token)])
-def create_record(series_id: str, kind: str, body: Body):
+@app.post("/api/series/{series_id}/{kind}")
+def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     rid, now = new_id(), time.time()
     data = validate_record(kind, clean(body.data))
@@ -432,8 +502,8 @@ def create_record(series_id: str, kind: str, body: Body):
     return {**data, "id": rid, "updated": now}
 
 
-@app.put("/api/series/{series_id}/{kind}/{rid}", dependencies=[Depends(check_token)])
-def update_record(series_id: str, kind: str, rid: str, body: Body):
+@app.put("/api/series/{series_id}/{kind}/{rid}")
+def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     now = time.time()
     data = validate_record(kind, clean(body.data))
@@ -447,8 +517,8 @@ def update_record(series_id: str, kind: str, rid: str, body: Body):
     return {**data, "id": rid, "updated": now}
 
 
-@app.delete("/api/series/{series_id}/{kind}/{rid}", dependencies=[Depends(check_token)])
-def delete_record(series_id: str, kind: str, rid: str):
+@app.delete("/api/series/{series_id}/{kind}/{rid}")
+def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
         cur = con.execute(
@@ -481,8 +551,8 @@ def delete_record(series_id: str, kind: str, rid: str):
 
 
 # ---- feedback
-@app.post("/api/feedback", dependencies=[Depends(check_token)], status_code=201)
-async def submit_feedback(body: dict[str, Any]):
+@app.post("/api/feedback", status_code=201)
+async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends(get_current_user)):
     """Files a GitHub issue from the pane's "Log Issue"/"Log Suggestion"
     buttons - see app/github_feedback.py. async because it awaits an
     outbound HTTPS call (httpx.AsyncClient) rather than blocking the

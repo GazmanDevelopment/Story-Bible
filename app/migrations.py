@@ -44,9 +44,25 @@ def _v1_initial_schema(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS ix_rec ON records(series_id, kind)")
 
 
+def _v2_users_table(con: sqlite3.Connection) -> None:
+    """#10: people who have signed in at least once (Entra `oid`, never
+    email, as the primary key - see app/auth.py). Also used in non-entra
+    modes' get_current_user, for the synthetic local/shared identities, so
+    `created_by`/`updated_by` (#12) always resolve to a real users row."""
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS users (
+               oid TEXT PRIMARY KEY,
+               email TEXT NOT NULL DEFAULT '',
+               display_name TEXT NOT NULL DEFAULT '',
+               first_seen REAL NOT NULL,
+               last_seen REAL NOT NULL)"""
+    )
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
+    _v2_users_table,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
