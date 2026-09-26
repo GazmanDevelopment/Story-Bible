@@ -275,7 +275,39 @@ async def lifespan(app: FastAPI):
         pass
 
 
-app = FastAPI(title="Story Bible", version=__version__, lifespan=lifespan)
+# #45: grouping/descriptions for the Swagger UI (/docs) and ReDoc (/redoc)
+# FastAPI already serves for free. This tag list is metadata only, but the
+# response_model=... added below on the small fixed-shape endpoints (health,
+# config, me, users, members) is a real behaviour change, not just docs: it
+# makes FastAPI filter the returned dict down to that model's declared
+# fields. Every current field was checked against what each handler
+# actually returns, so nothing is dropped today - but adding a new field to
+# one of those handlers later without updating its matching *Out model
+# would silently vanish from the response instead of erroring. Deliberately
+# NOT applied to series/record/bundle responses - those stay untyped, per
+# this module's docstring on why records are intentionally loose JSON.
+TAGS_METADATA = [
+    {"name": "health", "description": "Liveness/readiness checks for monitoring - no auth required."},
+    {"name": "auth", "description": "Sign-in config and the caller's own identity."},
+    {"name": "series", "description": "A series is the top-level container everything else hangs off. "
+        "Records are stored as free-form JSON (see module docstring), so request/response bodies here "
+        "are intentionally loosely typed rather than validated on the way out."},
+    {"name": "sharing", "description": "Owner/editor/viewer membership on a series (#11)."},
+    {"name": "records", "description": "Chapters, characters, locations, events, relationships and "
+        "research entries within a series."},
+    {"name": "feedback", "description": "Files a GitHub issue from the task pane's Log Issue/Log "
+        "Suggestion buttons."},
+]
+
+app = FastAPI(
+    title="Story Bible",
+    version=__version__,
+    description="Backend for the Story Bible Word task-pane add-in - characters, places, "
+        "relationships and a timeline for a per-series story bible. See PLAN.md in the repo "
+        "for the full data model and the AUTH_MODE options used by `Authorize` above.",
+    openapi_tags=TAGS_METADATA,
+    lifespan=lifespan,
+)
 init_db()
 
 
@@ -433,7 +465,14 @@ def people_map(con, *records: dict[str, Any]) -> dict[str, str]:
 
 
 # ---- health
-@app.get("/api/health")
+class HealthResponse(BaseModel):
+    ok: bool
+    auth: bool
+    version: str
+
+
+@app.get("/api/health", tags=["health"], response_model=HealthResponse,
+         responses={503: {"description": "Database unreachable, or the data directory isn't writable"}})
 def health():
     body: dict[str, Any] = {"ok": True, "auth": auth.AUTH_MODE != "none", "version": __version__}
     if not _db_ok():
@@ -448,7 +487,13 @@ def health():
 MAX_BACKUP_AGE_SECONDS = 36 * 3600
 
 
-@app.get("/api/health/backup")
+class HealthBackupResponse(BaseModel):
+    ok: bool
+    age_seconds: float
+
+
+@app.get("/api/health/backup", tags=["health"], response_model=HealthBackupResponse,
+         responses={503: {"description": "No successful backup yet, or the most recent one is stale"}})
 def health_backup():
     """For monitoring (#17), not the pane - unauthenticated like /api/health,
     since a monitoring tool won't have STORYBIBLE_TOKEN either."""
@@ -461,7 +506,13 @@ def health_backup():
 
 
 # ---- auth (#10)
-@app.get("/api/config")
+class ConfigOut(BaseModel):
+    authMode: str
+    tenantId: str
+    clientId: str
+
+
+@app.get("/api/config", tags=["auth"], response_model=ConfigOut)
 def get_config():
     """Public (no auth) - the pane needs this before it has any way to
     authenticate, to know *how* to sign in (#13). Only ever the tenant/
@@ -474,12 +525,25 @@ def get_config():
     }
 
 
-@app.get("/api/me")
+class MeOut(BaseModel):
+    oid: str
+    email: str
+    displayName: str
+    isPipeline: bool
+
+
+@app.get("/api/me", tags=["auth"], response_model=MeOut)
 def get_me(user: auth.CurrentUser = Depends(get_current_user)):
     return {"oid": user.oid, "email": user.email, "displayName": user.display_name, "isPipeline": user.is_pipeline}
 
 
-@app.get("/api/users")
+class UserOut(BaseModel):
+    oid: str
+    email: str
+    display_name: str
+
+
+@app.get("/api/users", tags=["auth"], response_model=list[UserOut])
 def list_users(user: auth.CurrentUser = Depends(get_current_user)):
     """People who have signed in at least once (#11) - for picking who to
     share a series with. Not scoped to any one series; being listed here
@@ -491,7 +555,7 @@ def list_users(user: auth.CurrentUser = Depends(get_current_user)):
 
 
 # ---- series
-@app.get("/api/series")
+@app.get("/api/series", tags=["series"])
 def list_series(user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
         ids = accessible_series_ids(con, user)
@@ -501,7 +565,7 @@ def list_series(user: auth.CurrentUser = Depends(get_current_user)):
     return sorted((row_to_obj(r) for r in rows), key=lambda s: s.get("name", "").lower())
 
 
-@app.post("/api/series")
+@app.post("/api/series", tags=["series"])
 def create_series(body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     sid = new_id()
     data = validate_series(clean(body.data))
@@ -516,7 +580,7 @@ def create_series(body: Body, user: auth.CurrentUser = Depends(get_current_user)
             "created_by": user.oid, "updated_by": user.oid}
 
 
-@app.put("/api/series/{series_id}")
+@app.put("/api/series/{series_id}", tags=["series"])
 def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     now = time.time()
     data = validate_series(clean(body.data))
@@ -534,7 +598,11 @@ def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(g
     return updated
 
 
-@app.delete("/api/series/{series_id}")
+class DeletedOut(BaseModel):
+    deleted: str
+
+
+@app.delete("/api/series/{series_id}", tags=["series"], response_model=DeletedOut)
 def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
         require_access(con, user, series_id, "owner")
@@ -542,7 +610,7 @@ def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_u
     return {"deleted": series_id}
 
 
-@app.get("/api/series/{series_id}/bundle")
+@app.get("/api/series/{series_id}/bundle", tags=["series"])
 def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     """Everything for one series in a single call (also used as the export)."""
     with db() as con:
@@ -556,7 +624,7 @@ def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     return {"series": s, "exported": time.time(), "people": people, **by_kind}
 
 
-@app.post("/api/import")
+@app.post("/api/import", tags=["series"])
 def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(get_current_user)):
     """Restore an exported bundle as a NEW series (ids are remapped)."""
     if not isinstance(bundle_in.get("series"), dict):
@@ -619,7 +687,19 @@ class MemberBody(BaseModel):
     role: str
 
 
-@app.get("/api/series/{series_id}/members")
+class MemberOut(BaseModel):
+    oid: str
+    role: str
+    display_name: str | None = None
+    email: str | None = None
+
+
+class MembersOut(BaseModel):
+    owner_oid: str
+    members: list[MemberOut]
+
+
+@app.get("/api/series/{series_id}/members", tags=["sharing"], response_model=MembersOut)
 def list_members(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
         row = require_access(con, user, series_id, "read")
@@ -631,7 +711,12 @@ def list_members(series_id: str, user: auth.CurrentUser = Depends(get_current_us
     return {"owner_oid": row["owner_oid"], "members": [dict(r) for r in rows]}
 
 
-@app.put("/api/series/{series_id}/members/{oid}")
+class MemberRoleOut(BaseModel):
+    oid: str
+    role: str
+
+
+@app.put("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=MemberRoleOut)
 def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUser = Depends(get_current_user)):
     if body.role not in ("editor", "viewer"):
         raise HTTPException(400, "role must be 'editor' or 'viewer'")
@@ -649,7 +734,7 @@ def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUse
     return {"oid": oid, "role": body.role}
 
 
-@app.delete("/api/series/{series_id}/members/{oid}")
+@app.delete("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=DeletedOut)
 def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(get_current_user)):
     """The owner can remove anyone; anyone can remove themselves (leave)."""
     with db() as con:
@@ -664,7 +749,7 @@ def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(get
 
 
 # ---- records (chapters / characters / locations / events / relationships)
-@app.get("/api/series/{series_id}/{kind}")
+@app.get("/api/series/{series_id}/{kind}", tags=["records"])
 def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
@@ -675,7 +760,7 @@ def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(get
     return [row_to_obj(r) for r in rows]
 
 
-@app.post("/api/series/{series_id}/{kind}")
+@app.post("/api/series/{series_id}/{kind}", tags=["records"])
 def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     rid, now = new_id(), time.time()
@@ -690,7 +775,7 @@ def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser 
     return {**data, "id": rid, "updated": now, "version": 1, "created_by": user.oid, "updated_by": user.oid}
 
 
-@app.put("/api/series/{series_id}/{kind}/{rid}")
+@app.put("/api/series/{series_id}/{kind}/{rid}", tags=["records"])
 def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     now = time.time()
@@ -715,7 +800,7 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
     return updated
 
 
-@app.delete("/api/series/{series_id}/{kind}/{rid}")
+@app.delete("/api/series/{series_id}/{kind}/{rid}", tags=["records"], response_model=DeletedOut)
 def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
@@ -756,7 +841,7 @@ def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = 
 
 
 # ---- feedback
-@app.post("/api/feedback", status_code=201)
+@app.post("/api/feedback", status_code=201, tags=["feedback"])
 async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends(get_current_user)):
     """Files a GitHub issue from the pane's "Log Issue"/"Log Suggestion"
     buttons - see app/github_feedback.py. async because it awaits an
@@ -767,7 +852,7 @@ async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends
 
 
 # ---- static task pane
-@app.get("/")
+@app.get("/", include_in_schema=False)
 def root():
     return FileResponse(STATIC_DIR / "index.html")
 
