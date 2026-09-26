@@ -11,6 +11,15 @@ Env vars:
   STORYBIBLE_TOKEN  optional shared secret; when set every /api call must
                     send it in the X-Token header
   MAX_BODY_BYTES    request body size cap, in bytes (default 5 MiB)
+  IMPORT_MAX_BODY_BYTES  body size cap for /api/import specifically, in
+                    bytes (default 20 MiB) - a whole-series bundle in one
+                    request, unlike every other route's single record, and
+                    research entries (#43) can each carry embedded images.
+                    Kept well short of a memory-exhaustion-friendly size
+                    rather than matched to some large hypothetical import,
+                    since STORYBIBLE_TOKEN is optional and this whole body
+                    is buffered before any auth check runs (see PLAN.md's
+                    "LAN/VPN only" guidance for the actual threat model)
 
 Nightly backups (VACUUM INTO + a JSON export per series) run in-process -
 see app/backup.py for BACKUP_DIR/BACKUP_KEEP_DAYS/BACKUP_HOUR and the
@@ -47,6 +56,7 @@ from .models import KIND_MODELS, SeriesIn
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
 TOKEN = os.environ.get("STORYBIBLE_TOKEN", "").strip()
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", 5 * 1024 * 1024))
+IMPORT_MAX_BODY_BYTES = int(os.environ.get("IMPORT_MAX_BODY_BYTES", 20 * 1024 * 1024))
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Record kinds that hang off a series
@@ -224,7 +234,12 @@ async def hardening_middleware(request: Request, call_next):
     # Reads (and Starlette caches) the whole body ourselves, so the cap is
     # enforced on what was actually sent rather than a Content-Length header
     # a client could omit (chunked transfer) or simply lie about.
-    if len(await request.body()) > MAX_BODY_BYTES:
+    # /api/import gets its own, larger cap: it's a whole series bundle in
+    # one request rather than a single record, and research entries (#43)
+    # can each carry embedded images - a handful of those alone can put a
+    # perfectly normal export over the general per-record cap.
+    limit = IMPORT_MAX_BODY_BYTES if request.url.path == "/api/import" else MAX_BODY_BYTES
+    if len(await request.body()) > limit:
         response = JSONResponse({"detail": "Request body too large"}, status_code=413)
     else:
         response = await call_next(request)

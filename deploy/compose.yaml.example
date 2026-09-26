@@ -59,8 +59,8 @@ services:
       # Backup schedule/monitoring (#5/#17) and log timestamps.
       TZ: "Australia/Sydney"
       # Everything else (BACKUP_DIR, BACKUP_KEEP_DAYS, BACKUP_HOUR,
-      # MAX_BODY_BYTES, STORYBIBLE_DB) has a sane default - add here only
-      # to override.
+      # MAX_BODY_BYTES, IMPORT_MAX_BODY_BYTES, STORYBIBLE_DB) has a sane
+      # default - add here only to override.
     mem_limit: 512m
     # No healthcheck block here - the image already defines one (see
     # Dockerfile's HEALTHCHECK); Docker uses it automatically.
