@@ -46,9 +46,10 @@ def _v1_initial_schema(con: sqlite3.Connection) -> None:
 
 def _v2_users_table(con: sqlite3.Connection) -> None:
     """#10: people who have signed in at least once (Entra `oid`, never
-    email, as the primary key - see app/auth.py). Also used in non-entra
-    modes' get_current_user, for the synthetic local/shared identities, so
-    `created_by`/`updated_by` (#12) always resolve to a real users row."""
+    email, as the primary key - see app/auth.py). Only populated in
+    AUTH_MODE=entra; none/token mode's synthetic local/shared identities
+    (#12's created_by/updated_by) are resolved via a small static map
+    instead of a DB write on every request in the common no-auth case."""
     con.execute(
         """CREATE TABLE IF NOT EXISTS users (
                oid TEXT PRIMARY KEY,
@@ -59,10 +60,26 @@ def _v2_users_table(con: sqlite3.Connection) -> None:
     )
 
 
+def _v3_ownership_and_sharing(con: sqlite3.Connection) -> None:
+    """#11: each series has an owner, and can be shared with other known
+    users as editor or viewer. owner_oid is '' for every series that
+    existed before this migration - app/main.py's get_current_user claims
+    those for whoever signs in first (also #11)."""
+    con.execute("ALTER TABLE series ADD COLUMN owner_oid TEXT NOT NULL DEFAULT ''")
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS members (
+               series_id TEXT NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+               oid TEXT NOT NULL,
+               role TEXT NOT NULL CHECK(role IN ('editor', 'viewer')),
+               PRIMARY KEY (series_id, oid))"""
+    )
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
     _v2_users_table,
+    _v3_ownership_and_sharing,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

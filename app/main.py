@@ -119,6 +119,8 @@ def row_to_obj(row: sqlite3.Row) -> dict[str, Any]:
     obj = json.loads(row["data"])
     obj["id"] = row["id"]
     obj["updated"] = row["updated"]
+    if "owner_oid" in row.keys():  # series rows only (#11)
+        obj["owner_oid"] = row["owner_oid"]
     return obj
 
 
@@ -126,9 +128,15 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+SERVER_MANAGED_KEYS = ("id", "updated", "series_id", "kind", "owner_oid", "version", "created_by", "updated_by")
+
+
 def clean(data: dict) -> dict:
-    """Strip server-managed keys before storing."""
-    return {k: v for k, v in data.items() if k not in ("id", "updated", "series_id", "kind")}
+    """Strip server-managed keys before storing - a client echoing back an
+    object the server sent it (e.g. {**prev, **edits}) must not be able to
+    self-promote via a crafted owner_oid, or roll back version/audit
+    fields (#11, #12)."""
+    return {k: v for k, v in data.items() if k not in SERVER_MANAGED_KEYS}
 
 
 # ------------------------------------------------------------------- validation
@@ -223,7 +231,11 @@ def get_current_user(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     if not user.is_pipeline:
         with db() as con:
-            upsert_user(con, user)
+            is_new = upsert_user(con, user)
+            if is_new:
+                # #11: the first person to ever sign in claims any series
+                # left over from before auth existed (owner_oid == '').
+                con.execute("UPDATE series SET owner_oid=? WHERE owner_oid=''", (user.oid,))
     return user
 
 
@@ -329,6 +341,52 @@ def check_kind(kind: str) -> None:
         raise HTTPException(404, f"Unknown kind '{kind}'")
 
 
+# ------------------------------------------------------------ ownership (#11)
+def member_role(con, series_id: str, oid: str) -> str | None:
+    row = con.execute("SELECT role FROM members WHERE series_id=? AND oid=?", (series_id, oid)).fetchone()
+    return row["role"] if row else None
+
+
+def require_access(con, user: auth.CurrentUser, series_id: str, need: str) -> sqlite3.Row:
+    """owner/editor/viewer can read, owner/editor can write, only the owner
+    can delete a series or change its sharing (`need` is "read", "write"
+    or "owner"). A series the caller can't access at all returns 404
+    (existence hidden); one they can see but can't act on this way
+    returns 403.
+
+    A no-op outside AUTH_MODE=entra (returns get_series_or_404 unchanged):
+    none/token deployments have no real per-user identity to check
+    ownership against, so they keep today's single-shared-bible access.
+    """
+    row = get_series_or_404(con, series_id)
+    if auth.AUTH_MODE != "entra":
+        return row
+    if user.is_pipeline:
+        if need != "read":
+            raise HTTPException(403, "The review pipeline is read-only")
+        return row
+    role = "owner" if row["owner_oid"] == user.oid else member_role(con, series_id, user.oid)
+    if role is None:
+        raise HTTPException(404, "Series not found")
+    if need == "read":
+        return row
+    if need == "write" and role in ("owner", "editor"):
+        return row
+    if need == "owner" and role == "owner":
+        return row
+    raise HTTPException(403, "Not allowed")
+
+
+def accessible_series_ids(con, user: auth.CurrentUser) -> set[str] | None:
+    """None means "don't filter" - every non-entra caller, and the
+    read-only review pipeline, which can see every series."""
+    if auth.AUTH_MODE != "entra" or user.is_pipeline:
+        return None
+    owned = {r["id"] for r in con.execute("SELECT id FROM series WHERE owner_oid=?", (user.oid,))}
+    member = {r["series_id"] for r in con.execute("SELECT series_id FROM members WHERE oid=?", (user.oid,))}
+    return owned | member
+
+
 # ---- health
 @app.get("/api/health")
 def health():
@@ -376,11 +434,25 @@ def get_me(user: auth.CurrentUser = Depends(get_current_user)):
     return {"oid": user.oid, "email": user.email, "displayName": user.display_name, "isPipeline": user.is_pipeline}
 
 
+@app.get("/api/users")
+def list_users(user: auth.CurrentUser = Depends(get_current_user)):
+    """People who have signed in at least once (#11) - for picking who to
+    share a series with. Not scoped to any one series; being listed here
+    only means "known to this server", the same low bar as showing up in
+    anyone's Entra directory."""
+    with db() as con:
+        rows = con.execute("SELECT oid, email, display_name FROM users ORDER BY display_name").fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---- series
 @app.get("/api/series")
 def list_series(user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
+        ids = accessible_series_ids(con, user)
         rows = con.execute("SELECT * FROM series").fetchall()
+    if ids is not None:
+        rows = [r for r in rows if r["id"] in ids]
     return sorted((row_to_obj(r) for r in rows), key=lambda s: s.get("name", "").lower())
 
 
@@ -390,8 +462,11 @@ def create_series(body: Body, user: auth.CurrentUser = Depends(get_current_user)
     data = validate_series(clean(body.data))
     now = time.time()
     with db() as con:
-        con.execute("INSERT INTO series VALUES (?,?,?)", (sid, json.dumps(data), now))
-    return {**data, "id": sid, "updated": now}
+        con.execute(
+            "INSERT INTO series (id, data, updated, owner_oid) VALUES (?,?,?,?)",
+            (sid, json.dumps(data), now, user.oid),
+        )
+    return {**data, "id": sid, "updated": now, "owner_oid": user.oid}
 
 
 @app.put("/api/series/{series_id}")
@@ -399,15 +474,15 @@ def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(g
     now = time.time()
     data = validate_series(clean(body.data))
     with db() as con:
-        get_series_or_404(con, series_id)
+        row = require_access(con, user, series_id, "write")
         con.execute("UPDATE series SET data=?, updated=? WHERE id=?", (json.dumps(data), now, series_id))
-    return {**data, "id": series_id, "updated": now}
+    return {**data, "id": series_id, "updated": now, "owner_oid": row["owner_oid"]}
 
 
 @app.delete("/api/series/{series_id}")
 def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
-        get_series_or_404(con, series_id)
+        require_access(con, user, series_id, "owner")
         con.execute("DELETE FROM series WHERE id=?", (series_id,))
     return {"deleted": series_id}
 
@@ -416,7 +491,7 @@ def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_u
 def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     """Everything for one series in a single call (also used as the export)."""
     with db() as con:
-        s = row_to_obj(get_series_or_404(con, series_id))
+        s = row_to_obj(require_access(con, user, series_id, "read"))
         rows = con.execute("SELECT * FROM records WHERE series_id=?", (series_id,)).fetchall()
     out: dict[str, Any] = {"series": s, "exported": time.time()}
     for k in KINDS:
@@ -466,7 +541,10 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(ge
 
     now = time.time()
     with db() as con:
-        con.execute("INSERT INTO series VALUES (?,?,?)", (sid, json.dumps(sdata), now))
+        con.execute(
+            "INSERT INTO series (id, data, updated, owner_oid) VALUES (?,?,?,?)",
+            (sid, json.dumps(sdata), now, user.oid),
+        )
         for k in KINDS:
             for rec in bundle_in.get(k, []):
                 data = validate_record(k, remap(clean(rec)))
@@ -477,12 +555,61 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(ge
     return {"id": sid, "name": sdata["name"]}
 
 
+# ---- sharing (#11)
+class MemberBody(BaseModel):
+    role: str
+
+
+@app.get("/api/series/{series_id}/members")
+def list_members(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
+    with db() as con:
+        row = require_access(con, user, series_id, "read")
+        rows = con.execute(
+            "SELECT members.oid, members.role, users.display_name, users.email "
+            "FROM members LEFT JOIN users ON users.oid = members.oid WHERE series_id=?",
+            (series_id,),
+        ).fetchall()
+    return {"owner_oid": row["owner_oid"], "members": [dict(r) for r in rows]}
+
+
+@app.put("/api/series/{series_id}/members/{oid}")
+def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUser = Depends(get_current_user)):
+    if body.role not in ("editor", "viewer"):
+        raise HTTPException(400, "role must be 'editor' or 'viewer'")
+    with db() as con:
+        row = require_access(con, user, series_id, "owner")
+        if oid == row["owner_oid"]:
+            raise HTTPException(400, "That person already owns this series")
+        if not con.execute("SELECT 1 FROM users WHERE oid=?", (oid,)).fetchone():
+            raise HTTPException(400, "Unknown user - they need to have signed in at least once")
+        con.execute(
+            "INSERT INTO members (series_id, oid, role) VALUES (?,?,?) "
+            "ON CONFLICT(series_id, oid) DO UPDATE SET role=excluded.role",
+            (series_id, oid, body.role),
+        )
+    return {"oid": oid, "role": body.role}
+
+
+@app.delete("/api/series/{series_id}/members/{oid}")
+def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(get_current_user)):
+    """The owner can remove anyone; anyone can remove themselves (leave)."""
+    with db() as con:
+        require_access(con, user, series_id, "read")
+        if auth.AUTH_MODE == "entra":
+            row = get_series_or_404(con, series_id)
+            is_owner = row["owner_oid"] == user.oid
+            if not (is_owner or oid == user.oid):
+                raise HTTPException(403, "Not allowed")
+        con.execute("DELETE FROM members WHERE series_id=? AND oid=?", (series_id, oid))
+    return {"deleted": oid}
+
+
 # ---- records (chapters / characters / locations / events / relationships)
 @app.get("/api/series/{series_id}/{kind}")
 def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
-        get_series_or_404(con, series_id)
+        require_access(con, user, series_id, "read")
         rows = con.execute(
             "SELECT * FROM records WHERE series_id=? AND kind=?", (series_id, kind)
         ).fetchall()
@@ -495,7 +622,7 @@ def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser 
     rid, now = new_id(), time.time()
     data = validate_record(kind, clean(body.data))
     with db() as con:
-        get_series_or_404(con, series_id)
+        require_access(con, user, series_id, "write")
         con.execute(
             "INSERT INTO records VALUES (?,?,?,?,?)", (rid, series_id, kind, json.dumps(data), now)
         )
@@ -508,6 +635,7 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
     now = time.time()
     data = validate_record(kind, clean(body.data))
     with db() as con:
+        require_access(con, user, series_id, "write")
         cur = con.execute(
             "UPDATE records SET data=?, updated=? WHERE id=? AND series_id=? AND kind=?",
             (json.dumps(data), now, rid, series_id, kind),
@@ -521,6 +649,7 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
 def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
+        require_access(con, user, series_id, "write")
         cur = con.execute(
             "DELETE FROM records WHERE id=? AND series_id=? AND kind=?", (rid, series_id, kind)
         )
