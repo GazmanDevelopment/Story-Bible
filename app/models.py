@@ -25,6 +25,8 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, Field
 
+from .html_sanitize import sanitize_html
+
 
 def _as_text(v: Any) -> str:
     if v is None:
@@ -32,7 +34,14 @@ def _as_text(v: Any) -> str:
     return v if isinstance(v, str) else str(v)
 
 
+def _as_sanitized_html(v: Any) -> str:
+    return sanitize_html(_as_text(v))
+
+
 LooseStr = Annotated[str, BeforeValidator(_as_text)]
+# For rich-text fields rendered as HTML rather than escaped as plain text
+# (currently just Research.body, #43) - see app/html_sanitize.py.
+SanitizedHtml = Annotated[str, BeforeValidator(_as_sanitized_html)]
 
 
 class SeriesIn(BaseModel):
@@ -92,10 +101,21 @@ class RelationshipIn(BaseModel):
     note: LooseStr = ""
 
 
+class ResearchIn(BaseModel):
+    title: LooseStr = ""
+    body: SanitizedHtml = ""
+    date_entered: LooseStr = ""
+    chapter_id: str = ""
+    character_ids: list[str] = Field(default_factory=list)
+    location_ids: list[str] = Field(default_factory=list)
+    event_ids: list[str] = Field(default_factory=list)
+
+
 KIND_MODELS: dict[str, type[BaseModel]] = {
     "chapters": ChapterIn,
     "characters": CharacterIn,
     "locations": LocationIn,
     "events": EventIn,
     "relationships": RelationshipIn,
+    "research": ResearchIn,
 }

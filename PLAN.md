@@ -17,11 +17,12 @@ Status: **working demo** in this folder. The real build happens in VS Code, usin
 | Relationships | Directional links ("Betsy *mistress of* Mark") with notes. Shown on both characters. |
 | Places | Name, where, description, relevance, linked characters. |
 | Timeline | Anchor is either a real date or a label ("Night one"). Events are stored as **+years/months/days offsets**, negative for backstory. The pane shows the computed date and **each character's age at that event**. Filter by chapter or character. |
+| Research | Freeform notes (title, rich-text body, date entered) linkable to a chapter and any number of characters/places/timeline events. Body is edited with a basic WYSIWYG editor (Quill); pasted/inserted images are resized and compressed client-side before saving. Searchable and sortable (newest/oldest/title). |
 | Word integration | **Find**: select a name in the doc, and the pane opens that character or place (aliases work). **Insert name at cursor.** |
 | Backup | Export a series as JSON, and import it back. |
 | Also works | The same page runs in a normal browser tab, which is handy for planning away from Word. |
 
-What the demo does **not** do: user sign-in (only an optional shared token; Entra ID is planned in §3), per-user ownership or sharing, handling of simultaneous edits, offline mode, scene bookmarks, images, a relationship graph, or production packaging.
+What the demo does **not** do: user sign-in (only an optional shared token; Entra ID is planned in §3), per-user ownership or sharing, handling of simultaneous edits, offline mode, scene bookmarks, reference images on characters/places (Research entries can embed images, but nothing else can yet - see Phase 5), a relationship graph, or production packaging.
 
 ---
 
@@ -70,8 +71,10 @@ Series { name, description, anchor_mode: date|relative, anchor_date, anchor_labe
  │                 custom: {field: value}, preferences, backstory, notes }
  ├─ Relationship { from, type, to, note }            (directional)
  ├─ Location     { name, place, description, relevance, character_ids[] }
- └─ Event        { title, off_y, off_m, off_d, chapter_id, location_id,
-                   character_ids[], description }
+ ├─ Event        { title, off_y, off_m, off_d, chapter_id, location_id,
+ │                 character_ids[], description }
+ └─ Research     { title, body (sanitized HTML), date_entered, chapter_id,
+                   character_ids[], location_ids[], event_ids[] }            (#43)
 ```
 
 ### Key decisions (and why)

@@ -59,6 +59,19 @@ label > span { display: block; font-size: 12px; color: var(--muted); margin-bott
   background: var(--bg); padding: 8px 0; border-top: 1px solid var(--line); margin-top: 12px; }
 .back { margin-bottom: 8px; }
 
+/* Quill (#43) - fold its toolbar/editor into the paper theme instead of
+   leaving its default white-on-white look. */
+#researchEditor { margin-bottom: 8px; }
+.ql-toolbar.ql-snow, .ql-container.ql-snow { border-color: var(--line); }
+.ql-toolbar.ql-snow { border-radius: 4px 4px 0 0; background: var(--panel); }
+.ql-container.ql-snow { border-radius: 0 0 4px 4px; background: var(--field); font: inherit; }
+.ql-editor { min-height: 140px; color: var(--ink); }
+.ql-snow .ql-stroke { stroke: var(--muted); }
+.ql-snow .ql-fill { fill: var(--muted); }
+.ql-snow .ql-picker { color: var(--muted); }
+.ql-snow.ql-toolbar button:hover .ql-stroke, .ql-snow.ql-toolbar button.ql-active .ql-stroke { stroke: var(--accent); }
+.ql-snow.ql-toolbar button:hover .ql-fill, .ql-snow.ql-toolbar button.ql-active .ql-fill { fill: var(--accent); }
+
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { background: var(--chip); border-radius: 12px; padding: 2px 9px; font-size: 12px;
   border: 1px solid transparent; cursor: pointer; user-select: none; }

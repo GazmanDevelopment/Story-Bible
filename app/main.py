@@ -50,7 +50,7 @@ MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", 5 * 1024 * 1024))
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Record kinds that hang off a series
-KINDS = ("chapters", "characters", "locations", "events", "relationships")
+KINDS = ("chapters", "characters", "locations", "events", "relationships", "research")
 
 # Logging: plain lines to stdout (never the request body or the token - see
 # the hardening_middleware below, which only ever logs method/path/status/
@@ -443,7 +443,7 @@ def delete_record(series_id: str, kind: str, rid: str):
             raise HTTPException(404, "Record not found")
         # Tidy up anything that pointed at the deleted record
         rows = con.execute(
-            "SELECT * FROM records WHERE series_id=? AND kind IN ('relationships','events','locations')",
+            "SELECT * FROM records WHERE series_id=? AND kind IN ('relationships','events','locations','research')",
             (series_id,),
         ).fetchall()
         for r in rows:
@@ -452,7 +452,7 @@ def delete_record(series_id: str, kind: str, rid: str):
                 con.execute("DELETE FROM records WHERE id=?", (r["id"],))
                 continue
             changed = False
-            for key in ("character_ids",):
+            for key in ("character_ids", "location_ids", "event_ids"):
                 if rid in d.get(key, []):
                     d[key] = [x for x in d[key] if x != rid]
                     changed = True

@@ -4,9 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Story Bible</title>
-  <link rel="stylesheet" href="styles.css?v=2">
+  <link rel="stylesheet" href="styles.css?v=3">
+  <!-- Quill (vendored, not CDN - this app is meant to run LAN/VPN-only). See
+       app/static/vendor/quill/NOTICE.md for version/license (BSD-3-Clause). -->
+  <link rel="stylesheet" href="vendor/quill/quill.snow.css">
   <!-- Office.js. Outside Word the page still works as a normal web app. -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="vendor/quill/quill.js"></script>
 </head>
 <body>
   <header id="top">
@@ -19,6 +23,7 @@
       <button data-tab="characters">Characters</button>
       <button data-tab="locations">Places</button>
       <button data-tab="events">Timeline</button>
+      <button data-tab="research">Research</button>
       <button data-tab="series">Series</button>
     </nav>
   </header>
