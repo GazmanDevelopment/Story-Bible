@@ -84,3 +84,10 @@ The app backs up its own database nightly (#5 - see `docs/BACKUP.md`), but
 that lives *inside* the same dataset. Add a periodic ZFS snapshot task on
 `tank/apps/storybible` too, so there's a copy outside the dataset entirely -
 see `docs/BACKUP.md`'s "TrueNAS: snapshot the dataset too" section.
+
+## Monitoring
+
+Point an uptime checker at `/api/health` and `/api/health/backup` (#17),
+and confirm TrueNAS alerting is actually wired to a notification service
+so a failed snapshot task above doesn't go unnoticed either - see
+`docs/MONITORING.md` for the exact setup.
