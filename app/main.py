@@ -11,9 +11,14 @@ Env vars:
   STORYBIBLE_TOKEN  optional shared secret; when set every /api call must
                     send it in the X-Token header
   MAX_BODY_BYTES    request body size cap, in bytes (default 5 MiB)
+
+Nightly backups (VACUUM INTO + a JSON export per series) run in-process -
+see app/backup.py for BACKUP_DIR/BACKUP_KEEP_DAYS/BACKUP_HOUR and the
+manual `python -m app.backup` entry point.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -21,7 +26,7 @@ import sqlite3
 import sys
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from . import __version__
+from . import backup as backup_mod
 from .migrations import migrate
 from .models import KIND_MODELS, SeriesIn
 
@@ -157,7 +163,31 @@ def check_token(x_token: str | None = Header(default=None)) -> None:
 
 
 # -------------------------------------------------------------------------- app
-app = FastAPI(title="Story Bible", version=__version__)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Starts the nightly backup scheduler (#5) alongside the server, and
+    cancels it cleanly on shutdown. Not triggered by TestClient(app) used
+    without a `with` block - i.e. not during this repo's existing tests -
+    since that's how the ASGI lifespan protocol works; only a real server
+    (uvicorn) or `with TestClient(app) as c:` sends the startup/shutdown
+    messages that invoke this."""
+    task = asyncio.create_task(backup_mod.scheduler())
+    yield
+    task.cancel()
+    # If the scheduler is mid-backup, it's inside asyncio.to_thread(), which
+    # cancellation can't interrupt - only the *next* `await` in that thread
+    # would raise, and there isn't one until the thread returns. Bounding
+    # our own wait keeps a slow backup from blocking shutdown indefinitely;
+    # it doesn't force the worker thread to stop (Python still joins
+    # non-daemon executor threads at process exit either way), just caps
+    # what this function itself waits for.
+    try:
+        await asyncio.wait_for(task, timeout=5)
+    except (asyncio.CancelledError, TimeoutError):
+        pass
+
+
+app = FastAPI(title="Story Bible", version=__version__, lifespan=lifespan)
 init_db()
 
 
@@ -240,6 +270,21 @@ def health():
         body.update(ok=False, error="data directory not writable")
         return JSONResponse(body, status_code=503)
     return body
+
+
+MAX_BACKUP_AGE_SECONDS = 36 * 3600
+
+
+@app.get("/api/health/backup")
+def health_backup():
+    """For monitoring (#17), not the pane - unauthenticated like /api/health,
+    since a monitoring tool won't have STORYBIBLE_TOKEN either."""
+    age = backup_mod.last_backup_age_seconds()
+    if age is None:
+        return JSONResponse({"ok": False, "error": "no successful backup yet"}, status_code=503)
+    if age > MAX_BACKUP_AGE_SECONDS:
+        return JSONResponse({"ok": False, "age_seconds": age, "error": "backup is stale"}, status_code=503)
+    return {"ok": True, "age_seconds": age}
 
 
 # ---- series
