@@ -159,6 +159,29 @@ def test_body_too_large_rejected_with_413(monkeypatch):
     assert r.status_code == 413
 
 
+def test_import_gets_its_own_larger_body_cap(monkeypatch):
+    """#43: a whole-series export/import bundle isn't a single record - it
+    can carry several Research entries' embedded images and legitimately
+    exceed the general per-record MAX_BODY_BYTES cap, so it's checked
+    against IMPORT_MAX_BODY_BYTES instead."""
+    monkeypatch.setattr(main, "MAX_BODY_BYTES", 10)
+    monkeypatch.setattr(main, "IMPORT_MAX_BODY_BYTES", 10_000)
+    bundle_in = {
+        "series": {"name": "T"}, "chapters": [], "characters": [], "locations": [],
+        "events": [], "relationships": [], "research": [],
+    }
+    # under IMPORT_MAX_BODY_BYTES but (with headroom to spare) over the tiny
+    # general MAX_BODY_BYTES set above - proves the import path isn't just
+    # silently using the general cap.
+    bundle_in["series"]["description"] = "x" * 5000
+    r = c.post("/api/import", json=bundle_in)
+    assert r.status_code == 200, r.text
+
+    monkeypatch.setattr(main, "IMPORT_MAX_BODY_BYTES", 10)
+    r = c.post("/api/import", json=bundle_in)
+    assert r.status_code == 413
+
+
 # ----------------------------------------------------------------- caching
 def test_api_responses_are_not_cached():
     r = c.get("/api/health")
