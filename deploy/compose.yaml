@@ -1,0 +1,29 @@
+# Story Bible - TrueNAS SCALE Custom App.
+#
+# Install: Apps -> Discover Apps -> (top-right) Install via YAML, paste this
+# file's contents, and set the dataset path below to match the dataset
+# created per deploy/README.md. The image itself is built locally on the
+# NAS by deploy/update.sh, not pulled from a registry - hence pull_policy:
+# never, and why there's no `image:` tag with a registry prefix.
+services:
+  storybible:
+    image: story-bible:current
+    pull_policy: never
+    restart: unless-stopped
+    user: "568:568"          # TrueNAS SCALE's "apps" user - matches the dataset's owner
+    ports:
+      - "2285:8000"           # host:container - port 8000 on this NAS is already used elsewhere
+    volumes:
+      # The dataset itself, mounted directly as /data - not a subdirectory
+      # under it. A subdirectory here wouldn't exist yet on first deploy,
+      # so Docker would auto-create it owned by root, and the container
+      # (running as 568:568) couldn't write to it. Mounting the dataset
+      # root means the chown in deploy/README.md's step 1 is the only
+      # ownership step needed. Adjust the path to your actual pool/dataset.
+      - /mnt/tank/apps/storybible:/data
+    env_file:
+      - .env                  # deploy/.env - resolved relative to this file, not the repo root.
+                               # Copy from ../.env.example; never commit the real one.
+    mem_limit: 512m
+    # No healthcheck block here - the image already defines one (see
+    # Dockerfile's HEALTHCHECK); Docker uses it automatically.
