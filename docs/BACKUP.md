@@ -35,14 +35,12 @@ run.
 ## Monitoring
 
 `GET /api/health/backup` (unauthenticated, like `/api/health` - a
-monitoring tool won't have `STORYBIBLE_TOKEN` either) returns:
-
-- **200** `{"ok": true, "age_seconds": ...}` if the last successful backup
-  is under 36 hours old.
-- **503** if it's older than that, or if a backup has never succeeded.
-
-Point an uptime check (Uptime Kuma or similar - see #17) at this URL so a
-silently-broken backup job doesn't go unnoticed for months.
+monitoring tool won't have `STORYBIBLE_TOKEN` either) returns **200**
+`{"ok": true, "age_seconds": ...}` if the last successful backup is under
+36 hours old, **503** if it's older than that or one has never succeeded.
+See [MONITORING.md](MONITORING.md) for actually wiring an uptime checker
+to this (and to `/api/health`) so a silently-broken backup job doesn't go
+unnoticed for months.
 
 ## TrueNAS: snapshot the dataset too
 

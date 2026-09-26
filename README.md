@@ -4,6 +4,7 @@ Word task-pane add-in plus a small FastAPI server for keeping a story bible (cha
 
 - **PLAN.md**: architecture, decisions, build phases, TrueNAS deployment, sideloading
 - **[docs/BACKUP.md](docs/BACKUP.md)** / **[docs/RESTORE.md](docs/RESTORE.md)**: what backs up automatically and how to restore it
+- **[docs/MONITORING.md](docs/MONITORING.md)**: uptime/backup-freshness alerts and TrueNAS snapshot alerts (#17)
 - **[deploy/README.md](deploy/README.md)**: deploying to TrueNAS (#6) - dataset, build, Custom App, reverse proxy
 - **[docs/FEEDBACK.md](docs/FEEDBACK.md)**: how the pane's "Log Issue"/"Log Suggestion" buttons work (#22)
 - `app/`: FastAPI backend (`main.py`) and task pane (`static/`)
