@@ -56,6 +56,14 @@ jobs:
           npx --yes office-addin-manifest validate manifest.dev.xml
           npx --yes office-addin-manifest validate manifest.prod.xml
 
+      - name: Third-party notices are up to date (#66)
+        run: |
+          python scripts/generate_third_party_notices.py
+          # Fails if THIRD_PARTY_NOTICES.md doesn't exactly match what
+          # requirements.txt's current dependency graph would produce right
+          # now - i.e. requirements.txt changed without regenerating it.
+          git diff --exit-code THIRD_PARTY_NOTICES.md
+
       - name: Run tests
         run: python -m pytest tests/ -v
 
