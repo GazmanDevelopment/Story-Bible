@@ -15,6 +15,9 @@ Env vars:
 Nightly backups (VACUUM INTO + a JSON export per series) run in-process -
 see app/backup.py for BACKUP_DIR/BACKUP_KEEP_DAYS/BACKUP_HOUR and the
 manual `python -m app.backup` entry point.
+
+"Log Issue"/"Log Suggestion" in the pane file a GitHub issue directly -
+see app/github_feedback.py for GITHUB_FEEDBACK_TOKEN (#22).
 """
 from __future__ import annotations
 
@@ -37,6 +40,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import __version__
 from . import backup as backup_mod
+from . import github_feedback as feedback_mod
 from .migrations import migrate
 from .models import KIND_MODELS, SeriesIn
 
@@ -459,6 +463,17 @@ def delete_record(series_id: str, kind: str, rid: str):
             if changed:
                 con.execute("UPDATE records SET data=? WHERE id=?", (json.dumps(d), r["id"]))
     return {"deleted": rid}
+
+
+# ---- feedback
+@app.post("/api/feedback", dependencies=[Depends(check_token)], status_code=201)
+async def submit_feedback(body: dict[str, Any]):
+    """Files a GitHub issue from the pane's "Log Issue"/"Log Suggestion"
+    buttons - see app/github_feedback.py. async because it awaits an
+    outbound HTTPS call (httpx.AsyncClient) rather than blocking the
+    single uvicorn worker on it."""
+    feedback = feedback_mod.validate_feedback(body)
+    return await feedback_mod.file_feedback(feedback)
 
 
 # ---- static task pane

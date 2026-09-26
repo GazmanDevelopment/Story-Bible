@@ -156,9 +156,18 @@ function renderHeader() {
 function render() {
   renderHeader();
   const m = $("#main");
+  // Checked before the "no series" empty state below, not after: feedback
+  // doesn't need a series to exist (it isn't tied to S.b at all), and if
+  // it were gated behind having one, a user hitting a bug that prevents
+  // creating their first series could never report that exact bug.
+  if (S.view?.kind === "feedback") { m.innerHTML = renderForm(); return; }
   if (!S.b) {
     m.innerHTML = `<div class="empty">Create a series to get started.<br><br>
-      <button class="primary" data-act="new-series">+ New series</button></div>`;
+      <button class="primary" data-act="new-series">+ New series</button>
+      <div class="toolbar" style="margin-top:12px;justify-content:center">
+        <button type="button" data-act="log-issue">Log Issue</button>
+        <button type="button" data-act="log-suggestion">Log Suggestion</button>
+      </div></div>`;
     return;
   }
   if (S.view) { m.innerHTML = renderForm(); return; }
@@ -256,6 +265,7 @@ function renderForm() {
   if (kind === "characters") return back + characterForm(r, !id);
   if (kind === "locations") return back + locationForm(r, !id);
   if (kind === "events") return back + eventForm(r, !id);
+  if (kind === "feedback") return back + feedbackForm(S.view.feedbackKind);
   return "";
 }
 
@@ -370,10 +380,26 @@ function seriesForm() {
   <div class="toolbar"><button type="button" data-act="export">Export JSON</button>
     <label style="margin:0" class="small"><button type="button" data-act="import-pick">Import JSON…</button>
     <input type="file" id="importFile" accept=".json" hidden></label></div>
+  <h3>Feedback</h3>
+  <div class="toolbar"><button type="button" data-act="log-issue">Log Issue</button>
+    <button type="button" data-act="log-suggestion">Log Suggestion</button></div>
   <h3>Connection</h3>
   <label><span>API token (only if the server sets STORYBIBLE_TOKEN)</span>
     <input id="tokenInput" type="password" value="${esc(lsGet("sb_token"))}"></label>
   <button type="button" data-act="save-token">Save token</button>`;
+}
+
+function feedbackForm(kind) {
+  const label = kind === "issue" ? "Log an issue" : "Log a suggestion";
+  return `<form data-kind="feedback" data-feedback-kind="${kind}">
+    <h2>${label}</h2>
+    ${field("title", "Title", "", "text", 'maxlength="120" placeholder="Short summary"')}
+    <div class="hint">3–120 characters.</div>
+    ${field("description", "Description", "", "textarea", 'rows="6" maxlength="4000" placeholder="What happened, or what you\'d like to see"')}
+    <div class="formbar"><div></div>
+      <div><button type="button" data-act="cancel">Cancel</button>
+      <button class="primary" data-act="save-feedback">${label}</button></div></div>
+  </form>`;
 }
 
 // ----------------------------------------------------------- form reading
@@ -403,7 +429,8 @@ async function onClick(ev) {
   const t = ev.target.closest("[data-act]"); if (!t) return;
   const act = t.dataset.act;
   if (["save", "chip", "add-field", "add-rel", "del-rel", "delete", "delete-series",
-       "add-chapter", "del-chapter", "cancel", "insert", "export", "import-pick", "save-token"].includes(act)) ev.preventDefault();
+       "add-chapter", "del-chapter", "cancel", "insert", "export", "import-pick", "save-token",
+       "log-issue", "log-suggestion", "save-feedback"].includes(act)) ev.preventDefault();
   try {
     switch (act) {
       case "open": S.view = { kind: t.dataset.kind, id: t.dataset.id }; render(); window.scrollTo(0, 0); break;
@@ -451,6 +478,27 @@ async function onClick(ev) {
       }
       case "import-pick": $("#importFile").click(); break;
       case "save-token": lsSet("sb_token", $("#tokenInput").value.trim()); await boot(); toast("Token saved"); break;
+      case "log-issue": S.view = { kind: "feedback", id: null, feedbackKind: "issue" }; render(); break;
+      case "log-suggestion": S.view = { kind: "feedback", id: null, feedbackKind: "suggestion" }; render(); break;
+      case "save-feedback": {
+        const form = t.closest("form");
+        const data = readForm(form);
+        const title = (data.title || "").trim(), description = (data.description || "").trim();
+        if (title.length < 3 || title.length > 120) { toast("Title must be 3–120 characters"); return; }
+        if (!description) { toast("Description is required"); return; }
+        const kind = form.dataset.feedbackKind;
+        t.disabled = true;
+        const original = t.textContent;
+        t.textContent = "Filing…";
+        try {
+          const r = await api("/feedback", "POST", { kind, title, description });
+          toast(`Filed as #${r.number}`);
+          S.view = null; render();
+        } finally {
+          t.disabled = false; t.textContent = original;
+        }
+        break;
+      }
     }
   } catch (err) { toast(err.message); console.error(err); }
 }
