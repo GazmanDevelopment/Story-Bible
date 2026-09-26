@@ -60,9 +60,11 @@ jobs:
       - name: Build image
         run: docker build -t story-bible:ci .
 
-      - name: Validate deploy/compose.yaml (#6)
+      - name: Validate deploy/compose.yaml.example (#6)
         # Self-contained (no env_file - #36), so no setup needed beforehand.
-        run: docker compose -f deploy/compose.yaml config
+        # The real deploy/compose.yaml is gitignored (#38) - nothing to
+        # check out in CI, so this validates the tracked template instead.
+        run: docker compose -f deploy/compose.yaml.example config
 
       - name: Container starts and reports healthy
         run: |

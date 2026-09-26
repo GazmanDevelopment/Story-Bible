@@ -8,3 +8,5 @@ venv/
 *.pem
 *.key
 *.crt
+/deploy/compose.yaml
+/deploy/compose.yaml.bak
