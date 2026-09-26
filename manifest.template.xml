@@ -1,32 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Story Bible - Word add-in manifest (add-in only XML manifest).
-  Demo points at https://localhost:3000 (run_demo.py with the https flag).
-  For TrueNAS, replace every https://localhost:3000 with your server URL,
-  e.g. https://storybible.horscrust.com, and generate a fresh <Id> GUID.
+  Story Bible - Word add-in manifest template.
+  Do not sideload this file directly - generate manifest.dev.xml or
+  manifest.prod.xml from it with scripts/generate_manifest.py (see #8).
 -->
 <OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
            xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
            xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
            xsi:type="TaskPaneApp">
-  <Id>6f0c2c9e-4f7b-4a4e-9d52-3b8a1c7e5a10</Id>
-  <Version>1.0.0.0</Version>
+  <Id>{{ID}}</Id>
+  <Version>{{VERSION}}</Version>
   <ProviderName>Gareth</ProviderName>
   <DefaultLocale>en-AU</DefaultLocale>
   <DisplayName DefaultValue="Story Bible"/>
   <Description DefaultValue="Characters, places and timeline for your story series."/>
-  <IconUrl DefaultValue="https://localhost:3000/assets/icon-32.png"/>
-  <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/icon-64.png"/>
-  <SupportUrl DefaultValue="https://localhost:3000/"/>
+  <IconUrl DefaultValue="{{BASE_URL}}/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="{{BASE_URL}}/assets/icon-64.png"/>
+  <SupportUrl DefaultValue="{{BASE_URL}}/"/>
   <AppDomains>
-    <AppDomain>https://localhost:3000</AppDomain>
+{{APP_DOMAINS}}
   </AppDomains>
   <Hosts>
     <Host Name="Document"/>
   </Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://localhost:3000/index.html"/>
+    <SourceLocation DefaultValue="{{BASE_URL}}/index.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
 
@@ -72,12 +71,12 @@
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16" DefaultValue="https://localhost:3000/assets/icon-16.png"/>
-        <bt:Image id="Icon.32" DefaultValue="https://localhost:3000/assets/icon-32.png"/>
-        <bt:Image id="Icon.80" DefaultValue="https://localhost:3000/assets/icon-80.png"/>
+        <bt:Image id="Icon.16" DefaultValue="{{BASE_URL}}/assets/icon-16.png"/>
+        <bt:Image id="Icon.32" DefaultValue="{{BASE_URL}}/assets/icon-32.png"/>
+        <bt:Image id="Icon.80" DefaultValue="{{BASE_URL}}/assets/icon-80.png"/>
       </bt:Images>
       <bt:Urls>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/index.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="{{BASE_URL}}/index.html"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="GetStarted.Title" DefaultValue="Story Bible is ready"/>

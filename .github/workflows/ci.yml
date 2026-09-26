@@ -28,10 +28,21 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Compile check (catches syntax errors)
-        run: python -m compileall -q app tests run_demo.py make_samples.py
+        run: python -m compileall -q app tests scripts run_demo.py make_samples.py
 
-      - name: Validate manifest.xml is well-formed
-        run: python -c "import xml.etree.ElementTree as ET; ET.parse('manifest.xml')"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Manifests match the template, and validate (#8)
+        run: |
+          python scripts/generate_manifest.py
+          # Fails if committed manifest.dev.xml/manifest.prod.xml don't
+          # exactly match what the template+script would produce right now
+          # - i.e. someone hand-edited the output instead of the template.
+          git diff --exit-code manifest.dev.xml manifest.prod.xml
+          npx --yes office-addin-manifest validate manifest.dev.xml
+          npx --yes office-addin-manifest validate manifest.prod.xml
 
       - name: Run tests
         run: |

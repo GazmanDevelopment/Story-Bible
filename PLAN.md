@@ -34,14 +34,14 @@ What the demo does **not** do: user sign-in (only an optional shared token; Entr
  Word (Windows / Mac)      │                              │   TrueNAS SCALE
  ┌────────────────────────┐│  2. HTTPS + Bearer token ┌───┴──────────────────────────┐
  │ Task pane (HTML/JS)    │┴─────────────────────────▶│ Reverse proxy (Caddy/Traefik)│
- │  MSAL.js (NAA)         │                           │   storybible.horscrust.com   │
+ │  MSAL.js (NAA)         │                           │  storybible.huscroft.com.au  │
  │  Office.js:            │                           └──────────────┬───────────────┘
  │   - selection lookup   │                                          │
  │   - insert text        │                           ┌──────────────▼───────────────┐
  │   - doc settings tag   │                           │ Story Bible container        │
  └────────────────────────┘                           │  FastAPI  (/api/*)           │
           ▲                                           │   - validates Entra JWT      │
-          │ manifest.xml (sideloaded                  │   - owner/member checks      │
+          │ manifest.dev/prod.xml (sideloaded         │   - owner/member checks      │
           │ from an SMB share)                        │  serves task pane (/)        │
                                                       │  SQLite  → /data (dataset)   │
                                                       └──────────────────────────────┘
@@ -93,11 +93,19 @@ Series { name, description, anchor_mode: date|relative, anchor_date, anchor_labe
 - **Don't put the login at the reverse proxy** (oauth2-proxy, Authentik, Cloudflare Access). Redirect-and-cookie logins break inside Word's embedded task pane. Keep the proxy for TLS only and do auth in the app with bearer tokens.
 
 ### App registration (in the horscrust.com tenant)
+
+Two different domains are in play here, deliberately: the app itself is
+served from **`storybible.huscroft.com.au`** (the redirect URIs below, the
+reverse proxy, the manifest's URLs - see #6/#7/#8), but sign-in happens
+against the **`horscrust.com`** Entra tenant regardless of what domain the
+app is served from - a tenant authenticates users, it doesn't need to match
+the domain hosting the app that redirects to it.
+
 | Setting | Value |
 |---|---|
 | Name | Story Bible |
 | Supported account types | **Single tenant** (see "Your wife's account" below) |
-| Platform: Single-page application, redirect URIs | `brk-multihub://storybible.horscrust.com` (NAA), `https://storybible.horscrust.com` (browser), `https://localhost:3000` (dev) |
+| Platform: Single-page application, redirect URIs | `brk-multihub://storybible.huscroft.com.au` (NAA), `https://storybible.huscroft.com.au` (browser), `https://localhost:3000` (dev) - the app's own domain, not the tenant's |
 | Expose an API | App ID URI `api://<client-id>`, delegated scope **`access_as_user`** |
 | App role (Application type) | **`Pipeline.Read`**, for the review-pipeline daemon (client credentials, separate app registration with a certificate or secret) |
 | Enterprise app → Properties | **Assignment required = Yes**, then assign only you and your wife. Nobody else in the tenant can get a token. |
@@ -128,7 +136,7 @@ Series { name, description, anchor_mode: date|relative, anchor_date, anchor_labe
 ### Task pane changes
 - Add `@azure/msal-browser` and get tokens with `acquireTokenSilent`, falling back to `acquireTokenPopup`. Refresh the token silently before each save.
 - Add the signed-in name and a sign-out option to the header. Remove the "API token" box.
-- Check `Office.context.requirements.isSetSupported("NestedAppAuth", "1.1")`. Current Microsoft 365 Word supports it. **Perpetual Office 2021/2024 may not**, in which case fall back to the Office dialog API (`displayDialogAsync`) for the popup. Add `https://login.microsoftonline.com` to the manifest's `<AppDomains>` for that path.
+- Check `Office.context.requirements.isSetSupported("NestedAppAuth", "1.1")`. Current Microsoft 365 Word supports it. **Perpetual Office 2021/2024 may not**, in which case fall back to the Office dialog API (`displayDialogAsync`) for the popup. Add `https://login.microsoftonline.com` to the manifest's `<AppDomains>` for that path (already there in `manifest.prod.xml`, ahead of this landing - #8).
 - Pulling in MSAL via npm is the point where a small **Vite build** pays for itself (see Phase 0).
 
 ---
@@ -139,7 +147,7 @@ Series { name, description, anchor_mode: date|relative, anchor_date, anchor_labe
 - Copy this folder into a git repo. Keep the backend layout (`app/main.py`).
 - Front end: **move to Vite (plain JS or TypeScript)**, because Entra sign-in needs `@azure/msal-browser` from npm. Keep the demo's structure and let Vite bundle it into `app/static/`. Office's `yo office` generator also works, but it brings webpack and React by default, which is more than this needs.
 - Install the VS Code extensions: *Python*, *Office Add-ins Development Kit*. Run `npx office-addin-dev-certs install` once.
-- Debug loop: `python run_demo.py --https`, then sideload `manifest.xml` into Word (see §6).
+- Debug loop: `python run_demo.py --https`, then sideload `manifest.dev.xml` into Word (see §6; generated from `manifest.template.xml` by `scripts/generate_manifest.py`, #8).
 
 ### Phase 1: harden what the demo does (1–2 days)
 - Pydantic models per record kind (validation, defaults) while keeping the JSON storage.
@@ -149,7 +157,7 @@ Series { name, description, anchor_mode: date|relative, anchor_date, anchor_labe
 ### Phase 2: deploy to TrueNAS (½–1 day)
 - `Dockerfile` (python:3.12-slim, `uvicorn app.main:app --host 0.0.0.0 --port 8000`).
 - TrueNAS **Custom App** (compose), with a dataset such as `tank/apps/storybible` mounted at `/data`.
-- Reverse proxy with a real cert (Let's Encrypt DNS challenge), e.g. `storybible.horscrust.com`.
+- Reverse proxy with a real cert (Let's Encrypt DNS challenge), e.g. `storybible.huscroft.com.au`.
 - **Still recommend LAN/VPN-only**, even with Entra. Sign-in doesn't need the server to be public (see §2). If your wife uses it away from home, Tailscale on her laptop is simpler than exposing the server.
 - Update the manifest URLs, then sideload from an SMB share (see §6). Her PC needs the same Trusted Add-in Catalog setting.
 - Snapshot task on the dataset, plus a nightly JSON export per series.
@@ -199,11 +207,11 @@ Series { name, description, anchor_mode: date|relative, anchor_date, anchor_labe
 ## 6. Loading the add-in into Word
 
 **Windows (recommended: shared-folder catalog)**
-1. Put `manifest.xml` in a folder that's shared over SMB, e.g. `\\truenas\addins` or even a local shared folder.
+1. Put `manifest.dev.xml` (or `manifest.prod.xml` once deployed - see #6/#7) in a folder that's shared over SMB, e.g. `\\truenas\addins` or even a local shared folder.
 2. Word → File → Options → Trust Center → Trust Center Settings → **Trusted Add-in Catalogs**. Add the UNC path, tick **Show in Menu**, then OK.
 3. Restart Word → Home → **Add-ins → More add-ins → Shared Folder → Story Bible**. After that it shows as a button on the Home tab.
 
-**Mac:** copy `manifest.xml` to `~/Library/Containers/com.microsoft.Word/Data/Documents/wef/`, then restart Word.
+**Mac:** copy `manifest.dev.xml` (or `manifest.prod.xml`) to `~/Library/Containers/com.microsoft.Word/Data/Documents/wef/`, then restart Word.
 
 ---
 
@@ -213,7 +221,7 @@ Series { name, description, anchor_mode: date|relative, anchor_date, anchor_labe
 pip install fastapi uvicorn
 python run_demo.py                 # http://localhost:8765 in a browser, seeded with two sample series
 npx office-addin-dev-certs install # once, for Word
-python run_demo.py --https         # https://localhost:3000, then sideload manifest.xml
+python run_demo.py --https         # https://localhost:3000, then sideload manifest.dev.xml
 ```
 
 The sample data (`samples/*.json`) is fictional, with "(your detail here)" placeholders for the explicit fields. Import your own via Series tab → Import JSON.
