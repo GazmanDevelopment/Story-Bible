@@ -337,4 +337,28 @@ def test_unsaved_changes_guard_covers_series_settings_tab(server, browser_page):
 
     assert not errors, errors
 
+
+def test_relationship_type_suggestions_are_editable_per_series(server, browser_page):
+    """#63: the relationship type field was always free text (nothing
+    stopped typing "enemy of" before this) - what was missing was a way to
+    grow the *suggested* list itself, the same way character_fields already
+    let you customize the per-series default character fields."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    pg.fill("[data-f=relationship_types]", "enemy of\nrival of")
+    pg.click("[data-act=save]")
+    pg.wait_for_timeout(300)
+
+    pg.click("#tabs >> text=Characters")
+    pg.wait_for_selector(".list li")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+
+    options = pg.eval_on_selector_all("#relTypes option", "els => els.map(e => e.value)")
+    assert options == ["enemy of", "rival of"]
+
     assert not errors, errors
