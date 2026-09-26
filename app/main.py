@@ -10,32 +10,49 @@ Env vars:
   STORYBIBLE_DB     path to the SQLite file   (default /data/storybible.db)
   STORYBIBLE_TOKEN  optional shared secret; when set every /api call must
                     send it in the X-Token header
+  MAX_BODY_BYTES    request body size cap, in bytes (default 5 MiB)
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
+import sys
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from . import __version__
 from .migrations import migrate
+from .models import KIND_MODELS, SeriesIn
 
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
 TOKEN = os.environ.get("STORYBIBLE_TOKEN", "").strip()
+MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", 5 * 1024 * 1024))
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Record kinds that hang off a series
 KINDS = ("chapters", "characters", "locations", "events", "relationships")
+
+# Logging: plain lines to stdout (never the request body or the token - see
+# the hardening_middleware below, which only ever logs method/path/status/
+# time). Explicit StreamHandler because logging.basicConfig() defaults to
+# stderr, and we want this to show up in `docker logs`/TrueNAS app logs as
+# stdout like everything else.
+logger = logging.getLogger("storybible")
+logger.setLevel(logging.INFO)
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(logging.Formatter("%(message)s"))
+logger.addHandler(_handler)
+logger.propagate = False
 
 
 # --------------------------------------------------------------------------- db
@@ -84,6 +101,55 @@ def clean(data: dict) -> dict:
     return {k: v for k, v in data.items() if k not in ("id", "updated", "series_id", "kind")}
 
 
+# ------------------------------------------------------------------- validation
+def validate_series(data: dict) -> dict:
+    try:
+        return SeriesIn(**data).model_dump()
+    except ValidationError as e:
+        raise HTTPException(400, str(e))
+
+
+def validate_record(kind: str, data: dict) -> dict:
+    try:
+        return KIND_MODELS[kind](**data).model_dump(by_alias=True)
+    except ValidationError as e:
+        raise HTTPException(400, str(e))
+
+
+# --------------------------------------------------------------------- health
+def _db_ok() -> bool:
+    """/api/health has no auth (Docker/monitoring hit it directly), so the
+    *reason* for a failure is logged server-side, not put in the response -
+    a stray exception can contain a filesystem path or similar detail an
+    unauthenticated caller shouldn't get for free."""
+    try:
+        with db() as con:
+            con.execute("SELECT 1")
+        return True
+    except Exception as e:
+        logger.error("health check: database unreachable: %s", e)
+        return False
+
+
+def _data_dir_writable(data_dir: Path) -> bool:
+    """Same reasoning as _db_ok(): log the detail, don't return it."""
+    probe = data_dir / f".health-{uuid.uuid4().hex}"
+    try:
+        probe.write_text("")
+        probe.unlink()
+        return True
+    except OSError as e:
+        logger.error("health check: data directory not writable: %s", e)
+        return False
+
+
+def _sanitize_for_log(s: str) -> str:
+    """A request path is attacker-controlled and logged verbatim elsewhere
+    in this file - without this, a percent-encoded newline (`%0A`) in a URL
+    would let an unauthenticated caller forge fake-looking log lines."""
+    return s.replace("\r", "\\r").replace("\n", "\\n")
+
+
 # ------------------------------------------------------------------------- auth
 def check_token(x_token: str | None = Header(default=None)) -> None:
     if TOKEN and x_token != TOKEN:
@@ -93,6 +159,56 @@ def check_token(x_token: str | None = Header(default=None)) -> None:
 # -------------------------------------------------------------------------- app
 app = FastAPI(title="Story Bible", version=__version__)
 init_db()
+
+
+@app.middleware("http")
+async def hardening_middleware(request: Request, call_next):
+    """Three concerns in one pass, kept together so the ordering between
+    them can't drift apart:
+    - reject oversized request bodies with 413, before the route runs
+    - log every request to stdout: method, path, status, time taken -
+      never the body or the X-Token header
+    - mark every /api/* response as Cache-Control: no-store
+
+    An unhandled exception (not an HTTPException - one of those is already
+    a normal Response by the time it gets here) still propagates out of
+    `call_next` past this point: Starlette installs Exception/500 handlers
+    on ServerErrorMiddleware, which wraps *outside* this middleware, not
+    inside it - precisely so a broken user middleware can't hide a crash.
+    unhandled_exception_handler() below is the one actually producing that
+    response, so it does its own logging and sets its own Cache-Control
+    rather than relying on the tail of this function, which it never
+    reaches for that path.
+    """
+    start = time.perf_counter()
+    safe_path = _sanitize_for_log(request.url.path)
+
+    # Reads (and Starlette caches) the whole body ourselves, so the cap is
+    # enforced on what was actually sent rather than a Content-Length header
+    # a client could omit (chunked transfer) or simply lie about.
+    if len(await request.body()) > MAX_BODY_BYTES:
+        response = JSONResponse({"detail": "Request body too large"}, status_code=413)
+    else:
+        response = await call_next(request)
+
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    logger.info("%s %s %s %.1fms", request.method, safe_path, response.status_code, elapsed_ms)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Without this, an unhandled exception (e.g. a raw sqlite3 error) gets
+    Starlette's bare default 500 response - unlogged, and never marked
+    Cache-Control: no-store. This runs in ServerErrorMiddleware, outside
+    hardening_middleware (see its docstring), so it has to do both itself."""
+    logger.exception("%s %s 500 (unhandled)", request.method, _sanitize_for_log(request.url.path))
+    response = JSONResponse({"detail": "Internal server error"}, status_code=500)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 class Body(BaseModel):
@@ -114,7 +230,14 @@ def check_kind(kind: str) -> None:
 # ---- health
 @app.get("/api/health")
 def health():
-    return {"ok": True, "auth": bool(TOKEN), "version": __version__}
+    body: dict[str, Any] = {"ok": True, "auth": bool(TOKEN), "version": __version__}
+    if not _db_ok():
+        body.update(ok=False, error="database unavailable")
+        return JSONResponse(body, status_code=503)
+    if not _data_dir_writable(Path(DB_PATH).parent):
+        body.update(ok=False, error="data directory not writable")
+        return JSONResponse(body, status_code=503)
+    return body
 
 
 # ---- series
@@ -128,8 +251,7 @@ def list_series():
 @app.post("/api/series", dependencies=[Depends(check_token)])
 def create_series(body: Body):
     sid = new_id()
-    data = clean(body.data)
-    data.setdefault("name", "Untitled series")
+    data = validate_series(clean(body.data))
     now = time.time()
     with db() as con:
         con.execute("INSERT INTO series VALUES (?,?,?)", (sid, json.dumps(data), now))
@@ -139,7 +261,7 @@ def create_series(body: Body):
 @app.put("/api/series/{series_id}", dependencies=[Depends(check_token)])
 def update_series(series_id: str, body: Body):
     now = time.time()
-    data = clean(body.data)
+    data = validate_series(clean(body.data))
     with db() as con:
         get_series_or_404(con, series_id)
         con.execute("UPDATE series SET data=?, updated=? WHERE id=?", (json.dumps(data), now, series_id))
@@ -169,12 +291,26 @@ def bundle(series_id: str):
 @app.post("/api/import", dependencies=[Depends(check_token)])
 def import_bundle(bundle_in: dict[str, Any]):
     """Restore an exported bundle as a NEW series (ids are remapped)."""
-    if "series" not in bundle_in:
+    if not isinstance(bundle_in.get("series"), dict):
         raise HTTPException(400, "Not a Story Bible export")
+    for k in KINDS:
+        recs = bundle_in.get(k, [])
+        if not isinstance(recs, list) or not all(isinstance(r, dict) and r.get("id") for r in recs):
+            raise HTTPException(400, f"'{k}' must be a list of records, each with an id")
+    all_ids = [rec["id"] for k in KINDS for rec in bundle_in.get(k, [])]
+    if len(all_ids) != len(set(all_ids)):
+        # Two records sharing an id would collide in idmap below and both
+        # get remapped to the same new id, tripping the records.id primary
+        # key on insert (a 500) instead of a clean 400 here.
+        raise HTTPException(400, "Duplicate record id in import bundle")
+
     idmap: dict[str, str] = {}
     sid = new_id()
-    sdata = clean(bundle_in["series"])
-    sdata.setdefault("name", "Imported")
+    raw_sdata = clean(bundle_in["series"])
+    name_was_given = "name" in raw_sdata
+    sdata = validate_series(raw_sdata)
+    if not name_was_given:
+        sdata["name"] = "Imported"
     with db() as con:
         existing = {json.loads(r["data"]).get("name") for r in con.execute("SELECT data FROM series")}
     if sdata["name"] in existing:
@@ -197,9 +333,10 @@ def import_bundle(bundle_in: dict[str, Any]):
         con.execute("INSERT INTO series VALUES (?,?,?)", (sid, json.dumps(sdata), now))
         for k in KINDS:
             for rec in bundle_in.get(k, []):
+                data = validate_record(k, remap(clean(rec)))
                 con.execute(
                     "INSERT INTO records VALUES (?,?,?,?,?)",
-                    (idmap[rec["id"]], sid, k, json.dumps(remap(clean(rec))), now),
+                    (idmap[rec["id"]], sid, k, json.dumps(data), now),
                 )
     return {"id": sid, "name": sdata["name"]}
 
@@ -219,7 +356,8 @@ def list_records(series_id: str, kind: str):
 @app.post("/api/series/{series_id}/{kind}", dependencies=[Depends(check_token)])
 def create_record(series_id: str, kind: str, body: Body):
     check_kind(kind)
-    rid, now, data = new_id(), time.time(), clean(body.data)
+    rid, now = new_id(), time.time()
+    data = validate_record(kind, clean(body.data))
     with db() as con:
         get_series_or_404(con, series_id)
         con.execute(
@@ -231,7 +369,8 @@ def create_record(series_id: str, kind: str, body: Body):
 @app.put("/api/series/{series_id}/{kind}/{rid}", dependencies=[Depends(check_token)])
 def update_record(series_id: str, kind: str, rid: str, body: Body):
     check_kind(kind)
-    now, data = time.time(), clean(body.data)
+    now = time.time()
+    data = validate_record(kind, clean(body.data))
     with db() as con:
         cur = con.execute(
             "UPDATE records SET data=?, updated=? WHERE id=? AND series_id=? AND kind=?",
