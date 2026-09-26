@@ -66,6 +66,22 @@ def test_link_with_javascript_href_drops_the_href_but_keeps_the_text():
     assert out == "<a>click</a>"
 
 
+def test_link_with_protocol_relative_href_is_dropped():
+    # urlparse gives an empty scheme for "//host/path" same as for a plain
+    # relative path, but a browser resolves it against the page's own
+    # scheme - i.e. it behaves as a full absolute URL, not a same-site
+    # relative one, so it must be rejected the same as any other scheme
+    # outside the allowlist rather than let through as "no scheme".
+    out = sanitize_html('<a href="//evil.example.com/phish">click</a>')
+    assert "evil.example.com" not in out
+    assert out == "<a>click</a>"
+
+
+def test_link_with_bare_relative_href_is_dropped():
+    out = sanitize_html('<a href="/some/path">click</a>')
+    assert out == "<a>click</a>"
+
+
 def test_image_with_http_src_is_kept():
     out = sanitize_html('<img src="https://example.com/x.png" alt="pic">')
     assert out == '<img src="https://example.com/x.png" alt="pic">'

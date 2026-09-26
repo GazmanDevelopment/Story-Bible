@@ -8,8 +8,6 @@ are handled by app/migrations.py and applied automatically on startup.
 
 Env vars:
   STORYBIBLE_DB     path to the SQLite file   (default /data/storybible.db)
-  STORYBIBLE_TOKEN  optional shared secret; when set every /api call must
-                    send it in the X-Token header
   MAX_BODY_BYTES    request body size cap, in bytes (default 5 MiB)
   IMPORT_MAX_BODY_BYTES  body size cap for /api/import specifically, in
                     bytes (default 20 MiB) - a whole-series bundle in one
@@ -20,6 +18,18 @@ Env vars:
                     since STORYBIBLE_TOKEN is optional and this whole body
                     is buffered before any auth check runs (see PLAN.md's
                     "LAN/VPN only" guidance for the actual threat model)
+
+Auth (#10, see app/auth.py for the rest of this): AUTH_MODE is "none",
+"token" or "entra" (default: "token" if STORYBIBLE_TOKEN is set, else
+"none" - so an existing deployment that only ever set STORYBIBLE_TOKEN
+keeps behaving exactly as before with no other change required).
+  STORYBIBLE_TOKEN  AUTH_MODE=token's shared secret; every /api call must
+                    send it in the X-Token header
+  ENTRA_TENANT_ID   required for AUTH_MODE=entra
+  ENTRA_CLIENT_ID   required for AUTH_MODE=entra
+  ALLOWED_OIDS      optional comma-separated allowlist of Entra object ids,
+                    defence in depth on top of Entra's own "assignment
+                    required" - unset means don't add this extra check
 
 Nightly backups (VACUUM INTO + a JSON export per series) run in-process -
 see app/backup.py for BACKUP_DIR/BACKUP_KEEP_DAYS/BACKUP_HOUR and the
@@ -48,13 +58,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from . import __version__
+from . import auth
 from . import backup as backup_mod
 from . import github_feedback as feedback_mod
 from .migrations import migrate
 from .models import KIND_MODELS, SeriesIn
 
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
-TOKEN = os.environ.get("STORYBIBLE_TOKEN", "").strip()
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", 5 * 1024 * 1024))
 IMPORT_MAX_BODY_BYTES = int(os.environ.get("IMPORT_MAX_BODY_BYTES", 20 * 1024 * 1024))
 STATIC_DIR = Path(__file__).parent / "static"
@@ -109,6 +119,11 @@ def row_to_obj(row: sqlite3.Row) -> dict[str, Any]:
     obj = json.loads(row["data"])
     obj["id"] = row["id"]
     obj["updated"] = row["updated"]
+    obj["version"] = row["version"]
+    obj["created_by"] = row["created_by"]
+    obj["updated_by"] = row["updated_by"]
+    if "owner_oid" in row.keys():  # series rows only (#11)
+        obj["owner_oid"] = row["owner_oid"]
     return obj
 
 
@@ -116,9 +131,15 @@ def new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+SERVER_MANAGED_KEYS = ("id", "updated", "series_id", "kind", "owner_oid", "version", "created_by", "updated_by")
+
+
 def clean(data: dict) -> dict:
-    """Strip server-managed keys before storing."""
-    return {k: v for k, v in data.items() if k not in ("id", "updated", "series_id", "kind")}
+    """Strip server-managed keys before storing - a client echoing back an
+    object the server sent it (e.g. {**prev, **edits}) must not be able to
+    self-promote via a crafted owner_oid, or roll back version/audit
+    fields (#11, #12)."""
+    return {k: v for k, v in data.items() if k not in SERVER_MANAGED_KEYS}
 
 
 # ------------------------------------------------------------------- validation
@@ -171,9 +192,62 @@ def _sanitize_for_log(s: str) -> str:
 
 
 # ------------------------------------------------------------------------- auth
-def check_token(x_token: str | None = Header(default=None)) -> None:
-    if TOKEN and x_token != TOKEN:
-        raise HTTPException(status_code=401, detail="Bad or missing X-Token")
+def upsert_user(con: sqlite3.Connection, user: auth.CurrentUser) -> bool:
+    """Record/refresh a signed-in person in the `users` table (#10).
+    Returns True the first time this oid is ever seen - the caller uses
+    that to claim any ownerless series for them (#11)."""
+    now = time.time()
+    row = con.execute("SELECT oid FROM users WHERE oid=?", (user.oid,)).fetchone()
+    if row:
+        con.execute(
+            "UPDATE users SET email=?, display_name=?, last_seen=? WHERE oid=?",
+            (user.email, user.display_name, now, user.oid),
+        )
+        return False
+    con.execute(
+        "INSERT INTO users (oid, email, display_name, first_seen, last_seen) VALUES (?,?,?,?,?)",
+        (user.oid, user.email, user.display_name, now, now),
+    )
+    return True
+
+
+def get_current_user(
+    authorization: str | None = Header(default=None),
+    x_token: str | None = Header(default=None),
+) -> auth.CurrentUser:
+    """The one auth dependency every /api/* route (other than /api/health*
+    and /api/config) takes. Behaviour depends entirely on AUTH_MODE, so
+    every existing none/token deployment (and every test written before
+    #10 landed) keeps working unchanged - only AUTH_MODE=entra does real
+    per-person validation."""
+    if auth.AUTH_MODE == "none":
+        return auth.LOCAL_USER
+    if auth.AUTH_MODE == "token":
+        if auth.TOKEN and x_token != auth.TOKEN:
+            raise HTTPException(status_code=401, detail="Bad or missing X-Token")
+        return auth.SHARED_USER
+    # entra
+    try:
+        token = auth.bearer_token(authorization)
+        user = auth.resolve_entra_user(token)
+    except auth.AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    if not user.is_pipeline:
+        # A second connection beyond the one the route handler itself opens
+        # right after - each `with db() as con:` block is already its own
+        # connection throughout this file (no pooling), so this doubles
+        # SQLite connection setup for every entra-mode request. Not worth
+        # threading a shared, request-scoped connection through every route
+        # to save on local-file connect() calls this app's actual scale
+        # (a single writer, PLAN.md) makes negligible - see #12's PR
+        # discussion if usage ever grows enough to matter.
+        with db() as con:
+            is_new = upsert_user(con, user)
+            if is_new:
+                # #11: the first person to ever sign in claims any series
+                # left over from before auth existed (owner_oid == '').
+                con.execute("UPDATE series SET owner_oid=? WHERE owner_oid=''", (user.oid,))
+    return user
 
 
 # -------------------------------------------------------------------------- app
@@ -264,6 +338,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 class Body(BaseModel):
     data: dict[str, Any]
+    version: int | None = None  # required on PUT, ignored on POST (#12)
 
 
 def get_series_or_404(con, series_id: str) -> sqlite3.Row:
@@ -278,10 +353,89 @@ def check_kind(kind: str) -> None:
         raise HTTPException(404, f"Unknown kind '{kind}'")
 
 
+# ------------------------------------------------------------ ownership (#11)
+def member_role(con, series_id: str, oid: str) -> str | None:
+    row = con.execute("SELECT role FROM members WHERE series_id=? AND oid=?", (series_id, oid)).fetchone()
+    return row["role"] if row else None
+
+
+def require_access(con, user: auth.CurrentUser, series_id: str, need: str) -> sqlite3.Row:
+    """owner/editor/viewer can read, owner/editor can write, only the owner
+    can delete a series or change its sharing (`need` is "read", "write"
+    or "owner"). A series the caller can't access at all returns 404
+    (existence hidden); one they can see but can't act on this way
+    returns 403.
+
+    A no-op outside AUTH_MODE=entra (returns get_series_or_404 unchanged):
+    none/token deployments have no real per-user identity to check
+    ownership against, so they keep today's single-shared-bible access.
+    """
+    row = get_series_or_404(con, series_id)
+    if auth.AUTH_MODE != "entra":
+        return row
+    if user.is_pipeline:
+        if need != "read":
+            raise HTTPException(403, "The review pipeline is read-only")
+        return row
+    role = "owner" if row["owner_oid"] == user.oid else member_role(con, series_id, user.oid)
+    if role is None:
+        raise HTTPException(404, "Series not found")
+    if need == "read":
+        return row
+    if need == "write" and role in ("owner", "editor"):
+        return row
+    if need == "owner" and role == "owner":
+        return row
+    raise HTTPException(403, "Not allowed")
+
+
+def accessible_series_ids(con, user: auth.CurrentUser) -> set[str] | None:
+    """None means "don't filter" - every non-entra caller, and the
+    read-only review pipeline, which can see every series."""
+    if auth.AUTH_MODE != "entra" or user.is_pipeline:
+        return None
+    owned = {r["id"] for r in con.execute("SELECT id FROM series WHERE owner_oid=?", (user.oid,))}
+    member = {r["series_id"] for r in con.execute("SELECT series_id FROM members WHERE oid=?", (user.oid,))}
+    return owned | member
+
+
+# ------------------------------------------------------- concurrency (#12)
+# The two non-entra identities don't get a `users` row (see app/auth.py) -
+# resolved here instead of on every request in the common no-auth case.
+_SYNTHETIC_DISPLAY_NAMES = {auth.LOCAL_USER.oid: auth.LOCAL_USER.display_name, auth.SHARED_USER.oid: auth.SHARED_USER.display_name}
+
+
+def display_name_for(con, oid: str) -> str:
+    if not oid:
+        return ""
+    row = con.execute("SELECT display_name FROM users WHERE oid=?", (oid,)).fetchone()
+    if row and row["display_name"]:
+        return row["display_name"]
+    return _SYNTHETIC_DISPLAY_NAMES.get(oid, oid)
+
+
+def conflict(con, current: dict[str, Any]) -> HTTPException:
+    """A PUT lost the optimistic-concurrency race - #12 wants the current
+    record and who changed it back with the 409, so the caller can show
+    "changed by X" without a second round trip."""
+    return HTTPException(
+        status_code=409,
+        detail={"error": "conflict", "current": current, "updated_by": display_name_for(con, current.get("updated_by", ""))},
+    )
+
+
+def people_map(con, *records: dict[str, Any]) -> dict[str, str]:
+    """oid -> display name, for every created_by/updated_by among the
+    given records - the bundle's `people` map (#12), so the pane can show
+    "edited by X" without a request per record."""
+    oids = {r.get(k) for r in records for k in ("created_by", "updated_by") if r.get(k)}
+    return {oid: display_name_for(con, oid) for oid in oids}
+
+
 # ---- health
 @app.get("/api/health")
 def health():
-    body: dict[str, Any] = {"ok": True, "auth": bool(TOKEN), "version": __version__}
+    body: dict[str, Any] = {"ok": True, "auth": auth.AUTH_MODE != "none", "version": __version__}
     if not _db_ok():
         body.update(ok=False, error="database unavailable")
         return JSONResponse(body, status_code=503)
@@ -306,56 +460,104 @@ def health_backup():
     return {"ok": True, "age_seconds": age}
 
 
-# ---- series
-@app.get("/api/series", dependencies=[Depends(check_token)])
-def list_series():
+# ---- auth (#10)
+@app.get("/api/config")
+def get_config():
+    """Public (no auth) - the pane needs this before it has any way to
+    authenticate, to know *how* to sign in (#13). Only ever the tenant/
+    client id, both already public in the app's own manifest/redirect URIs
+    - nothing here is a secret."""
+    return {
+        "authMode": auth.AUTH_MODE,
+        "tenantId": auth.ENTRA_TENANT_ID,
+        "clientId": auth.ENTRA_CLIENT_ID,
+    }
+
+
+@app.get("/api/me")
+def get_me(user: auth.CurrentUser = Depends(get_current_user)):
+    return {"oid": user.oid, "email": user.email, "displayName": user.display_name, "isPipeline": user.is_pipeline}
+
+
+@app.get("/api/users")
+def list_users(user: auth.CurrentUser = Depends(get_current_user)):
+    """People who have signed in at least once (#11) - for picking who to
+    share a series with. Not scoped to any one series; being listed here
+    only means "known to this server", the same low bar as showing up in
+    anyone's Entra directory."""
     with db() as con:
+        rows = con.execute("SELECT oid, email, display_name FROM users ORDER BY display_name").fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---- series
+@app.get("/api/series")
+def list_series(user: auth.CurrentUser = Depends(get_current_user)):
+    with db() as con:
+        ids = accessible_series_ids(con, user)
         rows = con.execute("SELECT * FROM series").fetchall()
+    if ids is not None:
+        rows = [r for r in rows if r["id"] in ids]
     return sorted((row_to_obj(r) for r in rows), key=lambda s: s.get("name", "").lower())
 
 
-@app.post("/api/series", dependencies=[Depends(check_token)])
-def create_series(body: Body):
+@app.post("/api/series")
+def create_series(body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     sid = new_id()
     data = validate_series(clean(body.data))
     now = time.time()
     with db() as con:
-        con.execute("INSERT INTO series VALUES (?,?,?)", (sid, json.dumps(data), now))
-    return {**data, "id": sid, "updated": now}
+        con.execute(
+            "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
+            "VALUES (?,?,?,?,1,?,?)",
+            (sid, json.dumps(data), now, user.oid, user.oid, user.oid),
+        )
+    return {**data, "id": sid, "updated": now, "owner_oid": user.oid, "version": 1,
+            "created_by": user.oid, "updated_by": user.oid}
 
 
-@app.put("/api/series/{series_id}", dependencies=[Depends(check_token)])
-def update_series(series_id: str, body: Body):
+@app.put("/api/series/{series_id}")
+def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     now = time.time()
     data = validate_series(clean(body.data))
     with db() as con:
-        get_series_or_404(con, series_id)
-        con.execute("UPDATE series SET data=?, updated=? WHERE id=?", (json.dumps(data), now, series_id))
-    return {**data, "id": series_id, "updated": now}
+        require_access(con, user, series_id, "write")
+        if body.version is None:
+            raise HTTPException(428, "version is required")
+        cur = con.execute(
+            "UPDATE series SET data=?, updated=?, version=version+1, updated_by=? WHERE id=? AND version=?",
+            (json.dumps(data), now, user.oid, series_id, body.version),
+        )
+        if cur.rowcount == 0:
+            raise conflict(con, row_to_obj(get_series_or_404(con, series_id)))
+        updated = row_to_obj(get_series_or_404(con, series_id))
+    return updated
 
 
-@app.delete("/api/series/{series_id}", dependencies=[Depends(check_token)])
-def delete_series(series_id: str):
+@app.delete("/api/series/{series_id}")
+def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
-        get_series_or_404(con, series_id)
+        require_access(con, user, series_id, "owner")
         con.execute("DELETE FROM series WHERE id=?", (series_id,))
     return {"deleted": series_id}
 
 
-@app.get("/api/series/{series_id}/bundle", dependencies=[Depends(check_token)])
-def bundle(series_id: str):
+@app.get("/api/series/{series_id}/bundle")
+def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     """Everything for one series in a single call (also used as the export)."""
     with db() as con:
-        s = row_to_obj(get_series_or_404(con, series_id))
+        s = row_to_obj(require_access(con, user, series_id, "read"))
         rows = con.execute("SELECT * FROM records WHERE series_id=?", (series_id,)).fetchall()
-    out: dict[str, Any] = {"series": s, "exported": time.time()}
-    for k in KINDS:
-        out[k] = [row_to_obj(r) for r in rows if r["kind"] == k]
-    return out
+        by_kind: dict[str, list[dict[str, Any]]] = {k: [] for k in KINDS}
+        for r in rows:
+            by_kind[r["kind"]].append(row_to_obj(r))
+        all_recs = [rec for recs in by_kind.values() for rec in recs]
+        people = people_map(con, s, *all_recs)
+    return {"series": s, "exported": time.time(), "people": people, **by_kind}
 
 
-@app.post("/api/import", dependencies=[Depends(check_token)])
-def import_bundle(bundle_in: dict[str, Any]):
+@app.post("/api/import")
+def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(get_current_user)):
     """Restore an exported bundle as a NEW series (ids are remapped)."""
     if not isinstance(bundle_in.get("series"), dict):
         raise HTTPException(400, "Not a Story Bible export")
@@ -396,61 +598,128 @@ def import_bundle(bundle_in: dict[str, Any]):
 
     now = time.time()
     with db() as con:
-        con.execute("INSERT INTO series VALUES (?,?,?)", (sid, json.dumps(sdata), now))
+        con.execute(
+            "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
+            "VALUES (?,?,?,?,1,?,?)",
+            (sid, json.dumps(sdata), now, user.oid, user.oid, user.oid),
+        )
         for k in KINDS:
             for rec in bundle_in.get(k, []):
                 data = validate_record(k, remap(clean(rec)))
                 con.execute(
-                    "INSERT INTO records VALUES (?,?,?,?,?)",
-                    (idmap[rec["id"]], sid, k, json.dumps(data), now),
+                    "INSERT INTO records (id, series_id, kind, data, updated, version, created_by, updated_by) "
+                    "VALUES (?,?,?,?,?,1,?,?)",
+                    (idmap[rec["id"]], sid, k, json.dumps(data), now, user.oid, user.oid),
                 )
     return {"id": sid, "name": sdata["name"]}
 
 
+# ---- sharing (#11)
+class MemberBody(BaseModel):
+    role: str
+
+
+@app.get("/api/series/{series_id}/members")
+def list_members(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
+    with db() as con:
+        row = require_access(con, user, series_id, "read")
+        rows = con.execute(
+            "SELECT members.oid, members.role, users.display_name, users.email "
+            "FROM members LEFT JOIN users ON users.oid = members.oid WHERE series_id=?",
+            (series_id,),
+        ).fetchall()
+    return {"owner_oid": row["owner_oid"], "members": [dict(r) for r in rows]}
+
+
+@app.put("/api/series/{series_id}/members/{oid}")
+def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUser = Depends(get_current_user)):
+    if body.role not in ("editor", "viewer"):
+        raise HTTPException(400, "role must be 'editor' or 'viewer'")
+    with db() as con:
+        row = require_access(con, user, series_id, "owner")
+        if oid == row["owner_oid"]:
+            raise HTTPException(400, "That person already owns this series")
+        if not con.execute("SELECT 1 FROM users WHERE oid=?", (oid,)).fetchone():
+            raise HTTPException(400, "Unknown user - they need to have signed in at least once")
+        con.execute(
+            "INSERT INTO members (series_id, oid, role) VALUES (?,?,?) "
+            "ON CONFLICT(series_id, oid) DO UPDATE SET role=excluded.role",
+            (series_id, oid, body.role),
+        )
+    return {"oid": oid, "role": body.role}
+
+
+@app.delete("/api/series/{series_id}/members/{oid}")
+def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(get_current_user)):
+    """The owner can remove anyone; anyone can remove themselves (leave)."""
+    with db() as con:
+        require_access(con, user, series_id, "read")
+        if auth.AUTH_MODE == "entra":
+            row = get_series_or_404(con, series_id)
+            is_owner = row["owner_oid"] == user.oid
+            if not (is_owner or oid == user.oid):
+                raise HTTPException(403, "Not allowed")
+        con.execute("DELETE FROM members WHERE series_id=? AND oid=?", (series_id, oid))
+    return {"deleted": oid}
+
+
 # ---- records (chapters / characters / locations / events / relationships)
-@app.get("/api/series/{series_id}/{kind}", dependencies=[Depends(check_token)])
-def list_records(series_id: str, kind: str):
+@app.get("/api/series/{series_id}/{kind}")
+def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
-        get_series_or_404(con, series_id)
+        require_access(con, user, series_id, "read")
         rows = con.execute(
             "SELECT * FROM records WHERE series_id=? AND kind=?", (series_id, kind)
         ).fetchall()
     return [row_to_obj(r) for r in rows]
 
 
-@app.post("/api/series/{series_id}/{kind}", dependencies=[Depends(check_token)])
-def create_record(series_id: str, kind: str, body: Body):
+@app.post("/api/series/{series_id}/{kind}")
+def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     rid, now = new_id(), time.time()
     data = validate_record(kind, clean(body.data))
     with db() as con:
-        get_series_or_404(con, series_id)
+        require_access(con, user, series_id, "write")
         con.execute(
-            "INSERT INTO records VALUES (?,?,?,?,?)", (rid, series_id, kind, json.dumps(data), now)
+            "INSERT INTO records (id, series_id, kind, data, updated, version, created_by, updated_by) "
+            "VALUES (?,?,?,?,?,1,?,?)",
+            (rid, series_id, kind, json.dumps(data), now, user.oid, user.oid),
         )
-    return {**data, "id": rid, "updated": now}
+    return {**data, "id": rid, "updated": now, "version": 1, "created_by": user.oid, "updated_by": user.oid}
 
 
-@app.put("/api/series/{series_id}/{kind}/{rid}", dependencies=[Depends(check_token)])
-def update_record(series_id: str, kind: str, rid: str, body: Body):
+@app.put("/api/series/{series_id}/{kind}/{rid}")
+def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     now = time.time()
     data = validate_record(kind, clean(body.data))
     with db() as con:
+        require_access(con, user, series_id, "write")
+        if body.version is None:
+            raise HTTPException(428, "version is required")
         cur = con.execute(
-            "UPDATE records SET data=?, updated=? WHERE id=? AND series_id=? AND kind=?",
-            (json.dumps(data), now, rid, series_id, kind),
+            "UPDATE records SET data=?, updated=?, version=version+1, updated_by=? "
+            "WHERE id=? AND series_id=? AND kind=? AND version=?",
+            (json.dumps(data), now, user.oid, rid, series_id, kind, body.version),
         )
         if cur.rowcount == 0:
-            raise HTTPException(404, "Record not found")
-    return {**data, "id": rid, "updated": now}
+            existing = con.execute(
+                "SELECT * FROM records WHERE id=? AND series_id=? AND kind=?", (rid, series_id, kind)
+            ).fetchone()
+            if not existing:
+                raise HTTPException(404, "Record not found")
+            raise conflict(con, row_to_obj(existing))
+        updated = row_to_obj(con.execute("SELECT * FROM records WHERE id=?", (rid,)).fetchone())
+    return updated
 
 
-@app.delete("/api/series/{series_id}/{kind}/{rid}", dependencies=[Depends(check_token)])
-def delete_record(series_id: str, kind: str, rid: str):
+@app.delete("/api/series/{series_id}/{kind}/{rid}")
+def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
+        require_access(con, user, series_id, "write")
         cur = con.execute(
             "DELETE FROM records WHERE id=? AND series_id=? AND kind=?", (rid, series_id, kind)
         )
@@ -476,13 +745,19 @@ def delete_record(series_id: str, kind: str, rid: str):
                     d[key] = ""
                     changed = True
             if changed:
-                con.execute("UPDATE records SET data=? WHERE id=?", (json.dumps(d), r["id"]))
+                # Bumps version/updated_by too (#12) - a stale form editing
+                # one of these records must see a conflict on save rather
+                # than restoring the reference this delete just removed.
+                con.execute(
+                    "UPDATE records SET data=?, updated=?, version=version+1, updated_by=? WHERE id=?",
+                    (json.dumps(d), time.time(), user.oid, r["id"]),
+                )
     return {"deleted": rid}
 
 
 # ---- feedback
-@app.post("/api/feedback", dependencies=[Depends(check_token)], status_code=201)
-async def submit_feedback(body: dict[str, Any]):
+@app.post("/api/feedback", status_code=201)
+async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends(get_current_user)):
     """Files a GitHub issue from the pane's "Log Issue"/"Log Suggestion"
     buttons - see app/github_feedback.py. async because it awaits an
     outbound HTTPS call (httpx.AsyncClient) rather than blocking the

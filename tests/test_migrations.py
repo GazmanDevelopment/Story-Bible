@@ -22,9 +22,25 @@ def test_fresh_db_reaches_latest_version():
     migrate(con)
     assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     # tables exist and are usable
-    con.execute("INSERT INTO series VALUES ('s1','{}',0)")
-    con.execute("INSERT INTO records VALUES ('r1','s1','characters','{}',0)")
+    con.execute("INSERT INTO series (id, data, updated) VALUES ('s1','{}',0)")
+    con.execute("INSERT INTO records (id, series_id, kind, data, updated) VALUES ('r1','s1','characters','{}',0)")
     assert con.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 1
+    con.close()
+
+
+def test_v3_ownership_and_sharing_schema():
+    con = _new_db()
+    migrate(con)
+    con.execute("INSERT INTO series (id, data, updated) VALUES ('s1', '{}', 0)")
+    # owner_oid defaults to '' for a series inserted without one (matches
+    # what a pre-#11 database's existing rows look like after upgrading)
+    assert con.execute("SELECT owner_oid FROM series WHERE id='s1'").fetchone()[0] == ""
+
+    con.execute("PRAGMA foreign_keys = ON")
+    con.execute("INSERT INTO members (series_id, oid, role) VALUES ('s1', 'u1', 'editor')")
+    assert con.execute("SELECT COUNT(*) FROM members").fetchone()[0] == 1
+    con.execute("DELETE FROM series WHERE id='s1'")
+    assert con.execute("SELECT COUNT(*) FROM members").fetchone()[0] == 0  # cascade delete
     con.close()
 
 

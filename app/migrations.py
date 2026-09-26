@@ -44,9 +44,57 @@ def _v1_initial_schema(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS ix_rec ON records(series_id, kind)")
 
 
+def _v2_users_table(con: sqlite3.Connection) -> None:
+    """#10: people who have signed in at least once (Entra `oid`, never
+    email, as the primary key - see app/auth.py). Only populated in
+    AUTH_MODE=entra; none/token mode's synthetic local/shared identities
+    (#12's created_by/updated_by) are resolved via a small static map
+    instead of a DB write on every request in the common no-auth case."""
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS users (
+               oid TEXT PRIMARY KEY,
+               email TEXT NOT NULL DEFAULT '',
+               display_name TEXT NOT NULL DEFAULT '',
+               first_seen REAL NOT NULL,
+               last_seen REAL NOT NULL)"""
+    )
+
+
+def _v3_ownership_and_sharing(con: sqlite3.Connection) -> None:
+    """#11: each series has an owner, and can be shared with other known
+    users as editor or viewer. owner_oid is '' for every series that
+    existed before this migration - app/main.py's get_current_user claims
+    those for whoever signs in first (also #11)."""
+    con.execute("ALTER TABLE series ADD COLUMN owner_oid TEXT NOT NULL DEFAULT ''")
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS members (
+               series_id TEXT NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+               oid TEXT NOT NULL,
+               role TEXT NOT NULL CHECK(role IN ('editor', 'viewer')),
+               PRIMARY KEY (series_id, oid))"""
+    )
+
+
+def _v4_concurrency_and_audit(con: sqlite3.Connection) -> None:
+    """#12: optimistic concurrency (a PUT must send the `version` it
+    loaded; a stale one is rejected rather than silently overwritten - see
+    app/main.py's update_series/update_record) plus who created/last
+    touched each row. version/created_by/updated_by default to values
+    that make every pre-existing row look exactly like it was written
+    once by nobody in particular, which is the truth for data written
+    before this migration existed."""
+    for table in ("series", "records"):
+        con.execute(f"ALTER TABLE {table} ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        con.execute(f"ALTER TABLE {table} ADD COLUMN created_by TEXT NOT NULL DEFAULT ''")
+        con.execute(f"ALTER TABLE {table} ADD COLUMN updated_by TEXT NOT NULL DEFAULT ''")
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
+    _v2_users_table,
+    _v3_ownership_and_sharing,
+    _v4_concurrency_and_audit,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

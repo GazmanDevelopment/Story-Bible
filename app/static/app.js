@@ -14,7 +14,13 @@ const S = {
   tlChapter: "", tlChar: "",
   rsSort: "date_desc",  // research list: date_desc | date_asc | title
   docLink: null,      // {series_id, chapter_id} stored in the Word document
+  config: null,       // {authMode, tenantId, clientId} from GET /api/config (#13)
 };
+
+// MSAL state (#13) - not on S since it holds live library objects, not
+// plain data; msalAccount is the only piece the UI needs to read.
+let msalPca = null;
+let msalAccount = null;
 
 const REL_TYPES = ["married to", "partner of", "mistress of", "lover of", "ex of",
   "friend of", "best friend of", "sibling of", "parent of", "boss of", "colleague of",
@@ -38,12 +44,32 @@ function toast(msg) {
 
 async function api(path, method = "GET", body) {
   const headers = { "Content-Type": "application/json" };
-  const tok = lsGet("sb_token"); if (tok) headers["X-Token"] = tok;
+  if (S.config?.authMode === "entra") {
+    const token = await getAuthToken();
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+  } else {
+    const tok = lsGet("sb_token"); if (tok) headers["X-Token"] = tok;
+  }
   const res = await fetch("/api" + path, { method, headers,
     body: body === undefined ? undefined : JSON.stringify(body) });
   if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error(S.config?.authMode === "entra" ? "Signed out - sign in again" : "Needs API token (Series tab → Connection)");
+    }
     const txt = await res.text();
-    throw new Error(res.status === 401 ? "Needs API token (Series tab → Connection)" : txt);
+    // #12: 409/428 (and 400s from Pydantic) carry a structured `detail`
+    // rather than a plain string - surface something readable instead of
+    // the raw JSON blob. Full conflict-resolution UI (reload/keep-mine) is
+    // #14, not this - this is just "don't show garbage in the toast".
+    let message = txt;
+    try {
+      const detail = JSON.parse(txt).detail;
+      if (typeof detail === "string") message = detail;
+      else if (res.status === 409 && detail?.error === "conflict") {
+        message = `Changed by ${detail.updated_by || "someone else"} since you loaded it - reload and try again`;
+      }
+    } catch { /* not JSON - fall back to the raw text above */ }
+    throw new Error(message);
   }
   return res.json();
 }
@@ -99,6 +125,112 @@ function ageAt(c, e) {
   return Number.isFinite(a) ? a + yearsElapsed(e) : null;
 }
 
+// -------------------------------------------------------- auth (#13, MSAL)
+// createNestablePublicClientApplication (vendored MSAL, see
+// app/static/vendor/msal/NOTICE.md) is Microsoft's recommended single
+// entry point for both cases at once: inside Word when nested app auth is
+// supported, it does NAA; outside Word (or when it isn't) it behaves like
+// a normal PublicClientApplication, i.e. the standard browser-tab SPA
+// flow. Only genuinely old Word *without* NAA needs the separate dialog
+// fallback below.
+function msalScope() { return `api://${S.config.clientId}/access_as_user`; }
+
+function naaSupported() {
+  return S.inWord && !!window.Office?.context?.requirements?.isSetSupported?.("NestedAppAuth", "1.1");
+}
+
+async function initAuth() {
+  try {
+    S.config = await (await fetch("/api/config")).json();
+  } catch {
+    S.config = { authMode: "none", tenantId: "", clientId: "" };  // server unreachable - boot()'s own error state takes it from here
+  }
+  if (S.config.authMode !== "entra") return;
+  const msalConfig = {
+    auth: { clientId: S.config.clientId, authority: `https://login.microsoftonline.com/${S.config.tenantId}` },
+    cache: { cacheLocation: "localStorage" },  // survives the task pane closing/reopening with a document
+  };
+  try {
+    const useNaa = !S.inWord || naaSupported();
+    if (useNaa) {
+      msalPca = await msal.createNestablePublicClientApplication(msalConfig);
+    } else {
+      msalPca = new msal.PublicClientApplication(msalConfig);
+      await msalPca.initialize();
+    }
+    const accounts = msalPca.getAllAccounts();
+    if (accounts.length) msalAccount = accounts[0];
+  } catch (err) {
+    console.error("MSAL init failed", err);
+  }
+}
+
+async function getAuthToken() {
+  if (!msalPca || !msalAccount) return null;
+  try {
+    const result = await msalPca.acquireTokenSilent({ scopes: [msalScope()], account: msalAccount });
+    return result.accessToken;
+  } catch (err) {
+    console.error("Silent token acquisition failed", err);
+    return null;  // the next API call 401s, surfacing "sign in again" rather than looping silently
+  }
+}
+
+async function signIn() {
+  if (!msalPca) return;
+  try {
+    if (!S.inWord || naaSupported()) {
+      const result = await msalPca.acquireTokenPopup({ scopes: [msalScope()] });
+      msalAccount = result.account;
+    } else {
+      await signInViaDialog();
+    }
+  } catch (err) {
+    toast("Sign-in failed: " + err.message);
+  }
+}
+
+// Perpetual Office without NAA can't do a normal popup from the task pane,
+// so the interactive part happens in a separate Office dialog (a small
+// same-origin page, auth-dialog.html) running the standard redirect flow;
+// this instance then just re-reads the account both pages share via the
+// same localStorage cache.
+function signInViaDialog() {
+  return new Promise((resolve, reject) => {
+    Office.context.ui.displayDialogAsync(
+      window.location.origin + "/auth-dialog.html",
+      { height: 60, width: 30 },
+      (asyncResult) => {
+        if (asyncResult.status === Office.AsyncResultStatus.Failed) {
+          reject(new Error(asyncResult.error.message)); return;
+        }
+        const dialog = asyncResult.value;
+        dialog.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => {
+          dialog.close();
+          const msg = JSON.parse(arg.message);
+          if (!msg.ok) { reject(new Error(msg.error || "Sign-in failed")); return; }
+          msalAccount = msalPca.getAllAccounts()[0] || null;
+          resolve();
+        });
+        // The user closing the dialog (or Entra sign-in erroring out before
+        // messageParent ever runs) fires this instead of DialogMessageReceived -
+        // without handling it too, the promise above never settles and the
+        // Sign in button just looks permanently stuck on that attempt.
+        dialog.addEventHandler(Office.EventType.DialogEventReceived, () => {
+          reject(new Error("Sign-in cancelled"));
+        });
+      },
+    );
+  });
+}
+
+async function signOut() {
+  if (msalPca && msalAccount) {
+    try { await msalPca.getTokenCache().removeAccount(msalAccount); } catch { /* best-effort */ }
+  }
+  msalAccount = null;
+}
+
 // ---------------------------------------------------------------- Word glue
 async function readDocLink() {
   if (!S.inWord) return;
@@ -141,6 +273,11 @@ function renderHeader() {
     `<option value="__new">+ New series…</option>`;
   document.querySelectorAll("#tabs button").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === S.tab));
+
+  const ab = $("#authBar");
+  ab.innerHTML = S.config?.authMode !== "entra" ? "" : (msalAccount
+    ? `<span>${esc(msalAccount.name || msalAccount.username || "Signed in")}</span><button class="small" data-act="sign-out">Sign out</button>`
+    : `<button class="small primary" data-act="sign-in">Sign in</button>`);
 
   const lb = $("#linkBar");
   if (!S.inWord || !S.b) { lb.innerHTML = ""; return; }
@@ -534,10 +671,11 @@ function seriesForm() {
   <h3>Feedback</h3>
   <div class="toolbar"><button type="button" data-act="log-issue">Log Issue</button>
     <button type="button" data-act="log-suggestion">Log Suggestion</button></div>
+  ${S.config?.authMode === "token" ? `
   <h3>Connection</h3>
   <label><span>API token (only if the server sets STORYBIBLE_TOKEN)</span>
     <input id="tokenInput" type="password" value="${esc(lsGet("sb_token"))}"></label>
-  <button type="button" data-act="save-token">Save token</button>`;
+  <button type="button" data-act="save-token">Save token</button>` : ""}`;
 }
 
 function feedbackForm(kind) {
@@ -581,7 +719,7 @@ async function onClick(ev) {
   const act = t.dataset.act;
   if (["save", "chip", "add-field", "add-rel", "del-rel", "delete", "delete-series",
        "add-chapter", "del-chapter", "cancel", "insert", "export", "import-pick", "save-token",
-       "log-issue", "log-suggestion", "save-feedback"].includes(act)) ev.preventDefault();
+       "log-issue", "log-suggestion", "save-feedback", "sign-in", "sign-out"].includes(act)) ev.preventDefault();
   try {
     switch (act) {
       case "open": S.view = { kind: t.dataset.kind, id: t.dataset.id }; render(); window.scrollTo(0, 0); break;
@@ -629,6 +767,8 @@ async function onClick(ev) {
       }
       case "import-pick": $("#importFile").click(); break;
       case "save-token": lsSet("sb_token", $("#tokenInput").value.trim()); await boot(); toast("Token saved"); break;
+      case "sign-in": await signIn(); if (msalAccount) { await loadApp(); } else { renderHeader(); } break;
+      case "sign-out": await signOut(); S.b = null; S.seriesList = []; render(); break;
       case "log-issue": S.view = { kind: "feedback", id: null, feedbackKind: "issue" }; render(); break;
       case "log-suggestion": S.view = { kind: "feedback", id: null, feedbackKind: "suggestion" }; render(); break;
       case "save-feedback": {
@@ -667,7 +807,10 @@ async function newSeries() {
 async function save(kind, form) {
   const data = readForm(form);
   if (kind === "series") {
-    await api(`/series/${S.sid}`, "PUT", { data: { ...S.b.series, ...data } });
+    // #12: PUT must send back the version this was loaded at, so a save
+    // from a stale copy (someone else changed it meanwhile) 409s instead
+    // of silently overwriting their edit.
+    await api(`/series/${S.sid}`, "PUT", { data: { ...S.b.series, ...data }, version: S.b.series.version });
     await loadSeriesList(); await loadBundle(); render(); toast("Saved"); return;
   }
   if ((kind === "characters" || kind === "locations") && !data.name?.trim()) { toast("Name is required"); return; }
@@ -676,7 +819,7 @@ async function save(kind, form) {
   }
   if (S.view.id) {
     const prev = rec(kind, S.view.id);
-    await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data } });
+    await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data }, version: prev.version });
     await refreshKeepForm();
   } else {
     const r = await api(`/series/${S.sid}/${kind}`, "POST", { data });
@@ -730,7 +873,7 @@ function wire() {
   $("#btnFind").addEventListener("click", () => findSelection().catch((e) => toast(e.message)));
 }
 
-async function boot() {
+async function loadApp() {
   try {
     await loadSeriesList();
     await readDocLink();
@@ -742,6 +885,20 @@ async function boot() {
   } catch (err) {
     $("#main").innerHTML = `<div class="empty">Can't reach the Story Bible server.<br>${esc(err.message)}</div>`;
   }
+}
+
+async function boot() {
+  await initAuth();
+  if (S.config.authMode === "entra" && !msalAccount) {
+    // No cached account - MSAL popups need a user gesture anyway (a popup
+    // opened outside a click handler is just blocked), so this only ever
+    // shows a Sign in button, never auto-prompts.
+    renderHeader();
+    $("#main").innerHTML = `<div class="empty">Sign in to continue.<br><br>
+      <button class="primary" data-act="sign-in">Sign in</button></div>`;
+    return;
+  }
+  await loadApp();
 }
 
 function start(info) {

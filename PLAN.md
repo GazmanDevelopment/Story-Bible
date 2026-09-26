@@ -22,7 +22,7 @@ Status: **working demo** in this folder. The real build happens in VS Code, usin
 | Backup | Export a series as JSON, and import it back. |
 | Also works | The same page runs in a normal browser tab, which is handy for planning away from Word. |
 
-What the demo does **not** do: user sign-in (only an optional shared token; Entra ID is planned in §3), per-user ownership or sharing, handling of simultaneous edits, offline mode, scene bookmarks, reference images on characters/places (Research entries can embed images, but nothing else can yet - see Phase 5), a relationship graph, or production packaging.
+Entra ID sign-in, per-series ownership/sharing, and optimistic concurrency (§3, WP10-13) have landed - see the "Authentication and sharing" section below for what's actually implemented versus what's still config/UI work. What the demo does **not** do: a sharing panel or conflict-resolution UI in the pane itself (WP14 - deliberately deferred), offline mode, scene bookmarks, reference images on characters/places (Research entries can embed images, but nothing else can yet - see Phase 5), a relationship graph, or production packaging.
 
 ---
 
@@ -89,6 +89,16 @@ Series { name, description, anchor_mode: date|relative, anchor_date, anchor_labe
 
 ## 3. Authentication and sharing (Entra ID)
 
+**Status: implemented** (WP10-13; WP14's sharing/conflict UI is deliberately
+deferred - see issue #14). One deviation from the plan below worth calling
+out: WP13 originally called for moving the front end to a Vite build,
+specifically to pull in `@azure/msal-browser` from npm. It's vendored
+instead (`app/static/vendor/msal/`, same approach as Quill) - MSAL ships a
+ready-to-use browser bundle for exactly this case, so the project keeps its
+no-build-step, plain-files front end rather than taking on a Node build
+pipeline (and the Dockerfile/CI changes that would come with it) for a
+single library.
+
 ### Approach: Nested App Authentication (NAA) with MSAL.js
 - NAA is Microsoft's current recommended way for Office add-ins to sign users in. MSAL.js asks **Word** for a token for the account already signed into Word, so most of the time there's no login prompt. If that fails (different account, consent needed), it falls back to a popup.
 - The same code runs in a normal browser tab: `createNestablePublicClientApplication` falls back to the standard SPA flow outside Office.
@@ -108,7 +118,7 @@ the domain hosting the app that redirects to it.
 |---|---|
 | Name | Story Bible |
 | Supported account types | **Single tenant** (see "Your wife's account" below) |
-| Platform: Single-page application, redirect URIs | `brk-multihub://storybible.huscroft.com.au` (NAA), `https://storybible.huscroft.com.au` (browser), `https://localhost:3000` (dev) - the app's own domain, not the tenant's |
+| Platform: Single-page application, redirect URIs | `brk-multihub://storybible.huscroft.com.au` (NAA), `https://storybible.huscroft.com.au` (browser), `https://localhost:3000` (dev), `https://storybible.huscroft.com.au/auth-dialog.html` (perpetual Office without NAA - #13's dialog fallback does a normal redirect flow, so it needs its own exact URL registered too) - the app's own domain, not the tenant's |
 | Expose an API | App ID URI `api://<client-id>`, delegated scope **`access_as_user`** |
 | App role (Application type) | **`Pipeline.Read`**, for the review-pipeline daemon (client credentials, separate app registration with a certificate or secret) |
 | Enterprise app → Properties | **Assignment required = Yes**, then assign only you and your wife. Nobody else in the tenant can get a token. |
@@ -165,12 +175,12 @@ the domain hosting the app that redirects to it.
 - Update the manifest URLs, then sideload from an SMB share (see §6). Her PC needs the same Trusted Add-in Catalog setting.
 - Snapshot task on the dataset, plus a nightly JSON export per series.
 
-### Phase 3: Entra sign-in and sharing (2–3 days)
-- App registration, guest invite if needed, and assignment (see §3).
-- Server: JWT validation, `users` table, `AUTH_MODE`, owner/member checks on every route, `version` + 409 on updates, `created_by`/`updated_by`.
-- Pane: MSAL (NAA), header user badge, Share panel in the Series tab, and a conflict prompt on 409.
-- Migration: the first user to sign in claims any existing (pre-auth) series as owner.
-- Tests: fake-token fixture (sign test JWTs with a local key and point the validator at it). Cover a non-member getting 403, a viewer being unable to write, and a stale version getting 409.
+### Phase 3: Entra sign-in and sharing (2–3 days) - **done**, except the Share panel/conflict UI
+- App registration, guest invite if needed, and assignment (see §3) - done manually, #9.
+- Server: JWT validation, `users` table, `AUTH_MODE`, owner/member checks on every route, `version` + 409 on updates, `created_by`/`updated_by` - #10/#11/#12.
+- Pane: MSAL (NAA), header user badge - #13. Share panel in the Series tab and a conflict prompt on 409 are `#14`, not yet done (deliberately deferred).
+- Migration: the first user to sign in claims any existing (pre-auth) series as owner - #11.
+- Tests: fake-token fixture (sign test JWTs with a local key and point the validator at it). Cover a non-member getting 403, a viewer being unable to write, and a stale version getting 409 - all in tests/test_auth.py, tests/test_entra_integration.py, tests/test_ownership.py, tests/test_concurrency.py.
 
 ### Phase 4: deeper Word integration (2–4 days)
 - **Scene anchors:** "Mark this scene" wraps the selection in a content control or bookmark and stores `{chapter_id, bookmark}` on an event, so clicking the event jumps to the scene (same doc) or tells you which chapter to open.
