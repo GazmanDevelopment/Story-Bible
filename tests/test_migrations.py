@@ -23,7 +23,7 @@ def test_fresh_db_reaches_latest_version():
     assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     # tables exist and are usable
     con.execute("INSERT INTO series (id, data, updated) VALUES ('s1','{}',0)")
-    con.execute("INSERT INTO records VALUES ('r1','s1','characters','{}',0)")
+    con.execute("INSERT INTO records (id, series_id, kind, data, updated) VALUES ('r1','s1','characters','{}',0)")
     assert con.execute("SELECT COUNT(*) FROM records").fetchone()[0] == 1
     con.close()
 

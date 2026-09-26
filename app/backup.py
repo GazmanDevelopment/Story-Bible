@@ -110,12 +110,17 @@ def _export_json(json_root: Path) -> Path:
     the retention/folder-naming scheme is built around, not one per run."""
     from fastapi import HTTPException
 
+    from . import auth
     from . import main as app_main
     day_dir = json_root / datetime.now().strftime("%Y%m%d")
     day_dir.mkdir(parents=True, exist_ok=True)
-    for s in app_main.list_series():
+    # A direct in-process call, not a real request - list_series/bundle's
+    # `user` param needs a real CurrentUser. SYSTEM_USER (is_pipeline=True)
+    # sees every series regardless of AUTH_MODE/ownership, which a backup
+    # of the whole database must (#10/#11 are about API callers, not this).
+    for s in app_main.list_series(user=auth.SYSTEM_USER):
         try:
-            data = app_main.bundle(s["id"])
+            data = app_main.bundle(s["id"], user=auth.SYSTEM_USER)
         except HTTPException:
             # Deleted between list_series() and here. Not run_backup()'s
             # problem to fail over - skip it rather than losing the whole

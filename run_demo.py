@@ -18,6 +18,7 @@ HERE = Path(__file__).parent
 os.environ.setdefault("STORYBIBLE_DB", str(HERE / "data" / "demo.db"))
 
 import uvicorn  # noqa: E402
+from app import auth  # noqa: E402
 from app.main import app, import_bundle  # noqa: E402  (import creates the DB)
 
 
@@ -28,7 +29,10 @@ def seed_if_empty() -> None:
     if n == 0:
         for f in sorted((HERE / "samples").glob("*.json")):
             print("seeding", f.name)
-            import_bundle(json.loads(f.read_text()))
+            # Calling the route function directly, bypassing FastAPI's own
+            # request handling - its `user` param needs a real CurrentUser,
+            # not the Depends(...) sentinel it'd otherwise be left as.
+            import_bundle(json.loads(f.read_text()), user=auth.LOCAL_USER)
 
 
 if __name__ == "__main__":

@@ -64,7 +64,7 @@ def test_export_survives_a_series_deleted_mid_run(tmp_path, monkeypatch):
     real_list_series = main.list_series
     monkeypatch.setattr(
         main, "list_series",
-        lambda: real_list_series() + [{"id": "never-existed", "name": "ghost"}],
+        lambda user=None: real_list_series(user=user) + [{"id": "never-existed", "name": "ghost"}],
     )
 
     result = backup.run_backup()  # must not raise

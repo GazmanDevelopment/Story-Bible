@@ -119,6 +119,9 @@ def row_to_obj(row: sqlite3.Row) -> dict[str, Any]:
     obj = json.loads(row["data"])
     obj["id"] = row["id"]
     obj["updated"] = row["updated"]
+    obj["version"] = row["version"]
+    obj["created_by"] = row["created_by"]
+    obj["updated_by"] = row["updated_by"]
     if "owner_oid" in row.keys():  # series rows only (#11)
         obj["owner_oid"] = row["owner_oid"]
     return obj
@@ -327,6 +330,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 class Body(BaseModel):
     data: dict[str, Any]
+    version: int | None = None  # required on PUT, ignored on POST (#12)
 
 
 def get_series_or_404(con, series_id: str) -> sqlite3.Row:
@@ -385,6 +389,39 @@ def accessible_series_ids(con, user: auth.CurrentUser) -> set[str] | None:
     owned = {r["id"] for r in con.execute("SELECT id FROM series WHERE owner_oid=?", (user.oid,))}
     member = {r["series_id"] for r in con.execute("SELECT series_id FROM members WHERE oid=?", (user.oid,))}
     return owned | member
+
+
+# ------------------------------------------------------- concurrency (#12)
+# The two non-entra identities don't get a `users` row (see app/auth.py) -
+# resolved here instead of on every request in the common no-auth case.
+_SYNTHETIC_DISPLAY_NAMES = {auth.LOCAL_USER.oid: auth.LOCAL_USER.display_name, auth.SHARED_USER.oid: auth.SHARED_USER.display_name}
+
+
+def display_name_for(con, oid: str) -> str:
+    if not oid:
+        return ""
+    row = con.execute("SELECT display_name FROM users WHERE oid=?", (oid,)).fetchone()
+    if row and row["display_name"]:
+        return row["display_name"]
+    return _SYNTHETIC_DISPLAY_NAMES.get(oid, oid)
+
+
+def conflict(con, current: dict[str, Any]) -> HTTPException:
+    """A PUT lost the optimistic-concurrency race - #12 wants the current
+    record and who changed it back with the 409, so the caller can show
+    "changed by X" without a second round trip."""
+    return HTTPException(
+        status_code=409,
+        detail={"error": "conflict", "current": current, "updated_by": display_name_for(con, current.get("updated_by", ""))},
+    )
+
+
+def people_map(con, *records: dict[str, Any]) -> dict[str, str]:
+    """oid -> display name, for every created_by/updated_by among the
+    given records - the bundle's `people` map (#12), so the pane can show
+    "edited by X" without a request per record."""
+    oids = {r.get(k) for r in records for k in ("created_by", "updated_by") if r.get(k)}
+    return {oid: display_name_for(con, oid) for oid in oids}
 
 
 # ---- health
@@ -463,10 +500,12 @@ def create_series(body: Body, user: auth.CurrentUser = Depends(get_current_user)
     now = time.time()
     with db() as con:
         con.execute(
-            "INSERT INTO series (id, data, updated, owner_oid) VALUES (?,?,?,?)",
-            (sid, json.dumps(data), now, user.oid),
+            "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
+            "VALUES (?,?,?,?,1,?,?)",
+            (sid, json.dumps(data), now, user.oid, user.oid, user.oid),
         )
-    return {**data, "id": sid, "updated": now, "owner_oid": user.oid}
+    return {**data, "id": sid, "updated": now, "owner_oid": user.oid, "version": 1,
+            "created_by": user.oid, "updated_by": user.oid}
 
 
 @app.put("/api/series/{series_id}")
@@ -474,9 +513,17 @@ def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(g
     now = time.time()
     data = validate_series(clean(body.data))
     with db() as con:
-        row = require_access(con, user, series_id, "write")
-        con.execute("UPDATE series SET data=?, updated=? WHERE id=?", (json.dumps(data), now, series_id))
-    return {**data, "id": series_id, "updated": now, "owner_oid": row["owner_oid"]}
+        require_access(con, user, series_id, "write")
+        if body.version is None:
+            raise HTTPException(428, "version is required")
+        cur = con.execute(
+            "UPDATE series SET data=?, updated=?, version=version+1, updated_by=? WHERE id=? AND version=?",
+            (json.dumps(data), now, user.oid, series_id, body.version),
+        )
+        if cur.rowcount == 0:
+            raise conflict(con, row_to_obj(get_series_or_404(con, series_id)))
+        updated = row_to_obj(get_series_or_404(con, series_id))
+    return updated
 
 
 @app.delete("/api/series/{series_id}")
@@ -493,10 +540,12 @@ def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
         s = row_to_obj(require_access(con, user, series_id, "read"))
         rows = con.execute("SELECT * FROM records WHERE series_id=?", (series_id,)).fetchall()
-    out: dict[str, Any] = {"series": s, "exported": time.time()}
-    for k in KINDS:
-        out[k] = [row_to_obj(r) for r in rows if r["kind"] == k]
-    return out
+        by_kind: dict[str, list[dict[str, Any]]] = {k: [] for k in KINDS}
+        for r in rows:
+            by_kind[r["kind"]].append(row_to_obj(r))
+        all_recs = [rec for recs in by_kind.values() for rec in recs]
+        people = people_map(con, s, *all_recs)
+    return {"series": s, "exported": time.time(), "people": people, **by_kind}
 
 
 @app.post("/api/import")
@@ -542,15 +591,17 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(ge
     now = time.time()
     with db() as con:
         con.execute(
-            "INSERT INTO series (id, data, updated, owner_oid) VALUES (?,?,?,?)",
-            (sid, json.dumps(sdata), now, user.oid),
+            "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
+            "VALUES (?,?,?,?,1,?,?)",
+            (sid, json.dumps(sdata), now, user.oid, user.oid, user.oid),
         )
         for k in KINDS:
             for rec in bundle_in.get(k, []):
                 data = validate_record(k, remap(clean(rec)))
                 con.execute(
-                    "INSERT INTO records VALUES (?,?,?,?,?)",
-                    (idmap[rec["id"]], sid, k, json.dumps(data), now),
+                    "INSERT INTO records (id, series_id, kind, data, updated, version, created_by, updated_by) "
+                    "VALUES (?,?,?,?,?,1,?,?)",
+                    (idmap[rec["id"]], sid, k, json.dumps(data), now, user.oid, user.oid),
                 )
     return {"id": sid, "name": sdata["name"]}
 
@@ -624,9 +675,11 @@ def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser 
     with db() as con:
         require_access(con, user, series_id, "write")
         con.execute(
-            "INSERT INTO records VALUES (?,?,?,?,?)", (rid, series_id, kind, json.dumps(data), now)
+            "INSERT INTO records (id, series_id, kind, data, updated, version, created_by, updated_by) "
+            "VALUES (?,?,?,?,?,1,?,?)",
+            (rid, series_id, kind, json.dumps(data), now, user.oid, user.oid),
         )
-    return {**data, "id": rid, "updated": now}
+    return {**data, "id": rid, "updated": now, "version": 1, "created_by": user.oid, "updated_by": user.oid}
 
 
 @app.put("/api/series/{series_id}/{kind}/{rid}")
@@ -636,13 +689,22 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
     data = validate_record(kind, clean(body.data))
     with db() as con:
         require_access(con, user, series_id, "write")
+        if body.version is None:
+            raise HTTPException(428, "version is required")
         cur = con.execute(
-            "UPDATE records SET data=?, updated=? WHERE id=? AND series_id=? AND kind=?",
-            (json.dumps(data), now, rid, series_id, kind),
+            "UPDATE records SET data=?, updated=?, version=version+1, updated_by=? "
+            "WHERE id=? AND series_id=? AND kind=? AND version=?",
+            (json.dumps(data), now, user.oid, rid, series_id, kind, body.version),
         )
         if cur.rowcount == 0:
-            raise HTTPException(404, "Record not found")
-    return {**data, "id": rid, "updated": now}
+            existing = con.execute(
+                "SELECT * FROM records WHERE id=? AND series_id=? AND kind=?", (rid, series_id, kind)
+            ).fetchone()
+            if not existing:
+                raise HTTPException(404, "Record not found")
+            raise conflict(con, row_to_obj(existing))
+        updated = row_to_obj(con.execute("SELECT * FROM records WHERE id=?", (rid,)).fetchone())
+    return updated
 
 
 @app.delete("/api/series/{series_id}/{kind}/{rid}")
@@ -675,7 +737,13 @@ def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = 
                     d[key] = ""
                     changed = True
             if changed:
-                con.execute("UPDATE records SET data=? WHERE id=?", (json.dumps(d), r["id"]))
+                # Bumps version/updated_by too (#12) - a stale form editing
+                # one of these records must see a conflict on save rather
+                # than restoring the reference this delete just removed.
+                con.execute(
+                    "UPDATE records SET data=?, updated=?, version=version+1, updated_by=? WHERE id=?",
+                    (json.dumps(d), time.time(), user.oid, r["id"]),
+                )
     return {"deleted": rid}
 
 

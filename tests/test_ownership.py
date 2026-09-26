@@ -281,3 +281,20 @@ def test_list_users_returns_everyone_whos_signed_in():
     c.get("/api/me", headers=_as(oid))
     oids = {u["oid"] for u in c.get("/api/users", headers=_as(oid)).json()}
     assert oid in oids
+
+
+# --------------------------------------- #12's exact scenario, with real people
+def test_two_real_people_editing_the_same_record_the_second_gets_409(series):
+    ch = c.post(f"/api/series/{series['id']}/characters",
+                json={"data": {"name": "A"}}, headers=_as(OWNER_OID)).json()
+    # Both the owner and the editor load the record (same version)...
+    # ...the owner saves first...
+    c.put(f"/api/series/{series['id']}/characters/{ch['id']}",
+          json={"data": {"name": "Owner's edit"}, "version": ch["version"]}, headers=_as(OWNER_OID))
+    # ...then the editor's save, still holding the version they loaded, conflicts.
+    r = c.put(f"/api/series/{series['id']}/characters/{ch['id']}",
+              json={"data": {"name": "Editor's edit"}, "version": ch["version"]}, headers=_as(EDITOR_OID))
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["current"]["name"] == "Owner's edit"
+    assert detail["updated_by"] == OWNER_OID  # the fake token's `name` claim, a real display name

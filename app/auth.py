@@ -63,6 +63,12 @@ class CurrentUser:
 # real person once a deployment switches to entra mode.
 LOCAL_USER = CurrentUser(oid="local", email="", display_name="Local", is_pipeline=False)
 SHARED_USER = CurrentUser(oid="shared", email="", display_name="Shared token", is_pipeline=False)
+# For in-process callers (the nightly backup job - see app/backup.py) that
+# call a route function directly rather than through a real request, and
+# need to see every series regardless of AUTH_MODE/ownership. is_pipeline
+# reuses main.py's existing "read anything, write nothing" bypass rather
+# than adding a second special case for the same behaviour.
+SYSTEM_USER = CurrentUser(oid="system", email="", display_name="Story Bible (system)", is_pipeline=True)
 
 
 def jwks_url() -> str:

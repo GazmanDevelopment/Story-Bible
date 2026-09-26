@@ -54,7 +54,8 @@ def test_create_read_update_delete_roundtrip():
     got = c.get(f"{base}/research").json()
     assert len(got) == 1 and got[0]["id"] == r["id"]
 
-    upd = c.put(f"{base}/research/{r['id']}", json={"data": {**r, "title": "Carriages (revised)"}}).json()
+    upd = c.put(f"{base}/research/{r['id']}",
+                json={"data": {**r, "title": "Carriages (revised)"}, "version": r["version"]}).json()
     assert upd["title"] == "Carriages (revised)"
 
     assert c.delete(f"{base}/research/{r['id']}").status_code == 200

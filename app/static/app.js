@@ -42,8 +42,21 @@ async function api(path, method = "GET", body) {
   const res = await fetch("/api" + path, { method, headers,
     body: body === undefined ? undefined : JSON.stringify(body) });
   if (!res.ok) {
+    if (res.status === 401) throw new Error("Needs API token (Series tab → Connection)");
     const txt = await res.text();
-    throw new Error(res.status === 401 ? "Needs API token (Series tab → Connection)" : txt);
+    // #12: 409/428 (and 400s from Pydantic) carry a structured `detail`
+    // rather than a plain string - surface something readable instead of
+    // the raw JSON blob. Full conflict-resolution UI (reload/keep-mine) is
+    // #14, not this - this is just "don't show garbage in the toast".
+    let message = txt;
+    try {
+      const detail = JSON.parse(txt).detail;
+      if (typeof detail === "string") message = detail;
+      else if (res.status === 409 && detail?.error === "conflict") {
+        message = `Changed by ${detail.updated_by || "someone else"} since you loaded it - reload and try again`;
+      }
+    } catch { /* not JSON - fall back to the raw text above */ }
+    throw new Error(message);
   }
   return res.json();
 }
@@ -667,7 +680,10 @@ async function newSeries() {
 async function save(kind, form) {
   const data = readForm(form);
   if (kind === "series") {
-    await api(`/series/${S.sid}`, "PUT", { data: { ...S.b.series, ...data } });
+    // #12: PUT must send back the version this was loaded at, so a save
+    // from a stale copy (someone else changed it meanwhile) 409s instead
+    // of silently overwriting their edit.
+    await api(`/series/${S.sid}`, "PUT", { data: { ...S.b.series, ...data }, version: S.b.series.version });
     await loadSeriesList(); await loadBundle(); render(); toast("Saved"); return;
   }
   if ((kind === "characters" || kind === "locations") && !data.name?.trim()) { toast("Name is required"); return; }
@@ -676,7 +692,7 @@ async function save(kind, form) {
   }
   if (S.view.id) {
     const prev = rec(kind, S.view.id);
-    await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data } });
+    await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data }, version: prev.version });
     await refreshKeepForm();
   } else {
     const r = await api(`/series/${S.sid}/${kind}`, "POST", { data });

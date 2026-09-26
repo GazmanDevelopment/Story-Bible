@@ -75,11 +75,26 @@ def _v3_ownership_and_sharing(con: sqlite3.Connection) -> None:
     )
 
 
+def _v4_concurrency_and_audit(con: sqlite3.Connection) -> None:
+    """#12: optimistic concurrency (a PUT must send the `version` it
+    loaded; a stale one is rejected rather than silently overwritten - see
+    app/main.py's update_series/update_record) plus who created/last
+    touched each row. version/created_by/updated_by default to values
+    that make every pre-existing row look exactly like it was written
+    once by nobody in particular, which is the truth for data written
+    before this migration existed."""
+    for table in ("series", "records"):
+        con.execute(f"ALTER TABLE {table} ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+        con.execute(f"ALTER TABLE {table} ADD COLUMN created_by TEXT NOT NULL DEFAULT ''")
+        con.execute(f"ALTER TABLE {table} ADD COLUMN updated_by TEXT NOT NULL DEFAULT ''")
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
     _v2_users_table,
     _v3_ownership_and_sharing,
+    _v4_concurrency_and_audit,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
