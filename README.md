@@ -10,3 +10,14 @@ Word task-pane add-in plus a small FastAPI server for keeping a story bible (cha
 - `screenshots/`: the pane at task-pane width
 
 Quick start: `pip install fastapi uvicorn` then `python run_demo.py` and open http://localhost:8765
+
+## Word showing an old version of the pane?
+
+The server sends `Cache-Control: no-cache` on the task pane's files, so Word
+should pick up a new `app.js`/`index.html` on the next reload without any
+manual step. If it still looks stale (Word's own WEF cache is unusually
+sticky), close Word and clear:
+
+```
+%LOCALAPPDATA%\Microsoft\Office\16.0\Wef\
+```

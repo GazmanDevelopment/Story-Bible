@@ -168,7 +168,11 @@ async def hardening_middleware(request: Request, call_next):
     - reject oversized request bodies with 413, before the route runs
     - log every request to stdout: method, path, status, time taken -
       never the body or the X-Token header
-    - mark every /api/* response as Cache-Control: no-store
+    - Cache-Control: /api/* gets no-store; everything else (the task pane's
+      index.html and static assets) gets no-cache, so Word/a browser always
+      revalidates instead of running a stale app.js after a deploy (#4).
+      StaticFiles already sets ETag/Last-Modified and honours conditional
+      GETs, so in practice that revalidation is a cheap 304 most of the time.
 
     An unhandled exception (not an HTTPException - one of those is already
     a normal Response by the time it gets here) still propagates out of
@@ -193,21 +197,19 @@ async def hardening_middleware(request: Request, call_next):
 
     elapsed_ms = (time.perf_counter() - start) * 1000
     logger.info("%s %s %s %.1fms", request.method, safe_path, response.status_code, elapsed_ms)
-    if request.url.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-store"
+    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
     return response
 
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     """Without this, an unhandled exception (e.g. a raw sqlite3 error) gets
-    Starlette's bare default 500 response - unlogged, and never marked
-    Cache-Control: no-store. This runs in ServerErrorMiddleware, outside
+    Starlette's bare default 500 response - unlogged, with no Cache-Control
+    set at all. This runs in ServerErrorMiddleware, outside
     hardening_middleware (see its docstring), so it has to do both itself."""
     logger.exception("%s %s 500 (unhandled)", request.method, _sanitize_for_log(request.url.path))
     response = JSONResponse({"detail": "Internal server error"}, status_code=500)
-    if request.url.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "no-store"
+    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
     return response
 
 
