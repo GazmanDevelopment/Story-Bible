@@ -81,3 +81,50 @@ def test_committed_manifests_match_what_the_generator_produces_now(tmp_path, mon
             f"manifest.{env}.xml doesn't match manifest.template.xml - "
             f"regenerate with: python scripts/generate_manifest.py {env}"
         )
+
+
+# ------------------------------------------------ GitHub Pages copy (#61)
+def test_generating_prod_also_publishes_docs_manifest(tmp_path, monkeypatch):
+    """docs/manifest.xml is what GitHub Pages serves for sideloading onto a
+    new laptop (Word's Upload My Add-in) - it must be an exact copy of
+    manifest.prod.xml, kept in sync by generate() itself rather than a
+    second hand-maintained copy that can drift."""
+    monkeypatch.setattr(gen, "ROOT", tmp_path)
+    prod = gen.generate("prod")
+    published = tmp_path / "docs" / "manifest.xml"
+    assert published.exists()
+    assert published.read_text() == prod.read_text()
+
+def test_generating_dev_does_not_touch_the_published_copy(tmp_path, monkeypatch):
+    """dev's manifest points at localhost - publishing it via Pages would
+    hand out a manifest that can never work outside this machine."""
+    monkeypatch.setattr(gen, "ROOT", tmp_path)
+    prod = gen.generate("prod")
+    gen.generate("dev")
+    published = tmp_path / "docs" / "manifest.xml"
+    assert published.read_text() == prod.read_text()
+    assert "localhost" not in published.read_text()
+
+def test_committed_docs_manifest_matches_prod(tmp_path, monkeypatch):
+    """Same drift check as test_committed_manifests_match_what_the_generator_
+    produces_now, extended to the Pages copy - covered separately since it's
+    a derived file the template doesn't touch directly."""
+    monkeypatch.setattr(gen, "ROOT", tmp_path)
+    fresh = gen.generate("prod")
+    committed = ROOT / "docs" / "manifest.xml"
+    assert committed.exists(), "docs/manifest.xml is not committed - run scripts/generate_manifest.py prod"
+    assert committed.read_text() == fresh.read_text(), (
+        "docs/manifest.xml doesn't match manifest.prod.xml - "
+        "regenerate with: python scripts/generate_manifest.py prod"
+    )
+
+def test_docs_landing_page_links_to_the_manifest_and_the_sideload_steps():
+    index = (ROOT / "docs" / "index.html").read_text()
+    assert "manifest.xml" in index
+    assert "Upload My Add-in" in index
+
+def test_docs_has_nojekyll_so_pages_serves_plain_static_files():
+    """Without this, GitHub Pages runs its default Jekyll build - which is
+    liable to mangle a hand-written index.html/manifest.xml pair that was
+    never meant to be Jekyll input."""
+    assert (ROOT / "docs" / ".nojekyll").exists()
