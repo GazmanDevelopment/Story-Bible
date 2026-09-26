@@ -39,7 +39,12 @@ def test_dev_points_at_localhost_prod_does_not():
     assert "localhost" not in gen.ENVIRONMENTS["prod"]["base_url"]
 
 def test_prod_app_domains_include_entra_login_ahead_of_10_13():
-    assert "https://login.microsoftonline.com" in gen.ENVIRONMENTS["prod"]["app_domains"]
+    # Written as an exact per-element match, not `x in some_string`, so this
+    # isn't mistakable for the URL-substring-sanitization anti-pattern (a
+    # domain check that trusts *any* position of a substring in a larger
+    # string) - app_domains is a list, membership here is exact equality.
+    domains: list[str] = gen.ENVIRONMENTS["prod"]["app_domains"]
+    assert any(d == "https://login.microsoftonline.com" for d in domains)
 
 def test_version_import_is_independent_of_root_used_for_output(tmp_path):
     """_version() imports `app` to read its version, and generate() writes
