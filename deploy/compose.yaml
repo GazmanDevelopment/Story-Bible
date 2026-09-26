@@ -1,10 +1,21 @@
 # Story Bible - TrueNAS SCALE Custom App.
 #
 # Install: Apps -> Discover Apps -> (top-right) Install via YAML, paste this
-# file's contents, and set the dataset path below to match the dataset
-# created per deploy/README.md. The image itself is built locally on the
-# NAS by deploy/update.sh, not pulled from a registry - hence pull_policy:
-# never, and why there's no `image:` tag with a registry prefix.
+# file's contents into the box, EDIT THE VALUES BELOW IN THAT PASTED TEXT
+# (dataset path, STORYBIBLE_TOKEN, etc. - see deploy/README.md), then
+# install. The image itself is built locally on the NAS by deploy/update.sh,
+# not pulled from a registry - hence pull_policy: never, and why there's no
+# `image:` tag with a registry prefix.
+#
+# Deliberately self-contained (no `env_file:` referencing a sibling .env) -
+# "Install via YAML" takes only this pasted text with nothing alongside it,
+# so a relative env_file path doesn't resolve to anything real (#36: it
+# actually looked for /tmp/.env, wherever TrueNAS staged the paste, and
+# failed). Fill in real values directly in the environment: block below -
+# same story whether you're pasting into that dialog or running
+# `docker compose -f deploy/compose.yaml up -d` yourself (e.g. over SSH) -
+# and don't commit a copy of this file with real values in it back to git.
+# .env.example documents what each setting does, for reference.
 services:
   storybible:
     image: story-bible:current
@@ -21,9 +32,27 @@ services:
       # root means the chown in deploy/README.md's step 1 is the only
       # ownership step needed. Adjust the path to your actual pool/dataset.
       - /mnt/tank/apps/storybible:/data
-    env_file:
-      - .env                  # deploy/.env - resolved relative to this file, not the repo root.
-                               # Copy from ../.env.example; never commit the real one.
+    environment:
+      # Auth (see .env.example for what each of these does). Left blank,
+      # STORYBIBLE_TOKEN is honestly wide open - app/main.py reports
+      # "auth": false at /api/health and skips the check entirely - rather
+      # than shipping a non-blank placeholder that would report "auth":
+      # true while actually being a publicly-known value (this file is on
+      # GitHub) anyone could authenticate with. Set a real one before
+      # anything sensitive goes in:
+      #   python -c "import secrets; print(secrets.token_urlsafe(32))"
+      AUTH_MODE: token
+      STORYBIBLE_TOKEN: ""
+      ENTRA_TENANT_ID: ""
+      ENTRA_CLIENT_ID: ""
+      ALLOWED_OIDS: ""
+      # The Synology reverse proxy's LAN IP - blank trusts nothing (127.0.0.1 default).
+      FORWARDED_ALLOW_IPS: ""
+      # Backup schedule/monitoring (#5/#17) and log timestamps.
+      TZ: "Australia/Sydney"
+      # Everything else (BACKUP_DIR, BACKUP_KEEP_DAYS, BACKUP_HOUR,
+      # MAX_BODY_BYTES, STORYBIBLE_DB) has a sane default - add here only
+      # to override.
     mem_limit: 512m
     # No healthcheck block here - the image already defines one (see
     # Dockerfile's HEALTHCHECK); Docker uses it automatically.

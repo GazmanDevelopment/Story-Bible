@@ -43,3 +43,33 @@ def test_env_example_documents_every_env_var_the_app_reads():
     documented = set(re.findall(r"^#?\s*([A-Z_]+)=", (ROOT / ".env.example").read_text(), re.MULTILINE))
     missing = used - documented
     assert not missing, f"{missing} read by the app but not documented in .env.example"
+
+def test_compose_yaml_has_no_env_file_directive():
+    """#36: TrueNAS's "Install via YAML" takes only the pasted text, with
+    nothing alongside it - a relative env_file path doesn't resolve to
+    anything real there (it looked for /tmp/.env and failed). Settings must
+    stay inline in environment: instead - regression guard against
+    reintroducing env_file: here. Only real (non-comment) lines count -
+    compose.yaml's own explanatory comment mentions "env_file" as prose."""
+    lines = (ROOT / "deploy" / "compose.yaml").read_text().splitlines()
+    real_lines = [l for l in lines if not l.strip().startswith("#")]
+    assert not any("env_file" in l for l in real_lines)
+
+def test_compose_yaml_environment_block_has_the_key_settings():
+    text = (ROOT / "deploy" / "compose.yaml").read_text()
+    for key in ("STORYBIBLE_TOKEN", "FORWARDED_ALLOW_IPS", "AUTH_MODE", "TZ"):
+        assert re.search(rf"^\s*{key}:", text, re.MULTILINE), f"{key} missing from compose.yaml's environment: block"
+
+def test_compose_yaml_has_no_real_secrets_or_identifiers():
+    """A committed real value for any of these would leak a secret, a real
+    Entra tenant/client id, or the Synology's LAN IP - guards against ever
+    accidentally pushing a filled-in copy of this file.
+
+    STORYBIBLE_TOKEN in particular must stay blank, not some non-empty
+    placeholder: app/main.py treats a blank token as "auth off" and says so
+    honestly (/api/health reports "auth": false) - a shipped placeholder
+    string would instead report "auth": true while actually being a value
+    anyone who has seen this public repo could authenticate with."""
+    text = (ROOT / "deploy" / "compose.yaml").read_text()
+    for key in ("STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS", "FORWARDED_ALLOW_IPS"):
+        assert re.search(rf'^\s*{key}: ""\s*$', text, re.MULTILINE), f'{key} is not blank ("") in compose.yaml'

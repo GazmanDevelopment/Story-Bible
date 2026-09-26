@@ -24,17 +24,10 @@ chown 568:568 /mnt/tank/apps/storybible
 ```
 git clone https://github.com/GazmanDevelopment/Story-Bible.git /mnt/tank/apps/storybible-src
 cd /mnt/tank/apps/storybible-src
-cp .env.example deploy/.env
 ```
 
-**`deploy/.env`, not `.env` at the repo root** - `docker compose`'s
-`env_file:` in `deploy/compose.yaml` resolves relative to the compose
-file's own directory, not wherever you run the command from.
-
-Edit `deploy/.env`: at minimum, set `STORYBIBLE_TOKEN` to a real secret (see
-the comment in `.env.example` for how to generate one) and
-`FORWARDED_ALLOW_IPS` to the Synology reverse proxy's LAN IP (#7). It's
-gitignored - it never gets committed.
+(`.env.example` here documents every setting the app reads, for reference -
+see step 4 for where the values actually go for this deployment path.)
 
 ## 3. Build the image
 
@@ -49,8 +42,18 @@ see the comment at the top of the script for rollback.
 ## 4. Create the Custom App
 
 TrueNAS UI → **Apps → Discover Apps** → (top-right) **Install via YAML** →
-paste the contents of `deploy/compose.yaml`, with the dataset path in its
-`volumes:` line adjusted to match step 1 if you used a different pool/path.
+paste the contents of `deploy/compose.yaml`, then, **in the pasted text
+itself** (this dialog doesn't accept a separate `.env` file - #36):
+
+- adjust the dataset path in `volumes:` if you used a different pool/path
+  than step 1
+- set `STORYBIBLE_TOKEN` to a real secret (see the comment above it in the
+  YAML for how to generate one)
+- set `FORWARDED_ALLOW_IPS` to the Synology reverse proxy's LAN IP (#7)
+
+then install. Don't paste those real values back into a copy of
+`compose.yaml` that gets committed to git - keep the checked-in file's
+placeholders as they are.
 
 The app listens on host port **2285** (port 8000 on this NAS is already in
 use by something else - see the #6/#7 issue comments), mapped from the
