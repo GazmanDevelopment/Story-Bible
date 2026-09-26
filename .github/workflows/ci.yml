@@ -27,6 +27,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Cache Playwright's browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements-dev.txt') }}
+
+      # Cache hit still needs the (fast) apt-get portion of --with-deps -
+      # only the Chromium download itself is what the cache actually saves.
+      - name: Install Playwright's browser (#15 - tests/test_ui.py)
+        run: playwright install --with-deps chromium
+
       - name: Compile check (catches syntax errors)
         run: python -m compileall -q app tests scripts run_demo.py make_samples.py
 
@@ -45,11 +56,7 @@ jobs:
           npx --yes office-addin-manifest validate manifest.prod.xml
 
       - name: Run tests
-        run: |
-          # tests/test_ui.py is a Playwright script, not a pytest suite - it
-          # runs at import time and expects a live server + sys.argv. Folding
-          # it into this suite properly is tracked in #15.
-          python -m pytest tests/ --ignore=tests/test_ui.py -v
+        run: python -m pytest tests/ -v
 
   docker-build:
     name: Docker build

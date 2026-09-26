@@ -14,12 +14,12 @@ test for the new behaviour in isolation:
 - Before pushing, run the whole suite and confirm it's green, not just the new
   test:
   ```
-  python -m pytest tests/ --ignore=tests/test_ui.py -v
+  python -m pytest tests/ -v
   python -m compileall -q app tests scripts run_demo.py make_samples.py
   ```
-  (`tests/test_ui.py` is excluded until it's converted to a real pytest suite -
-  see issue #15. If you touch the task pane, run it manually with Playwright
-  installed: `python tests/test_ui.py web` and `python tests/test_ui.py word`.)
+  (`tests/test_ui.py` is a real pytest suite - `pytest tests/` already
+  includes it, spinning up its own server + temp DB. It needs Playwright's
+  browser installed once: `playwright install chromium`.)
 - These same checks run in CI (`.github/workflows/ci.yml`) against every push
   and PR to `main` - a change with no test coverage or a red local run should
   not be pushed.
