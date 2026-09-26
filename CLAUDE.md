@@ -15,7 +15,7 @@ test for the new behaviour in isolation:
   test:
   ```
   python -m pytest tests/ --ignore=tests/test_ui.py -v
-  python -m compileall -q app tests run_demo.py make_samples.py
+  python -m compileall -q app tests scripts run_demo.py make_samples.py
   ```
   (`tests/test_ui.py` is excluded until it's converted to a real pytest suite -
   see issue #15. If you touch the task pane, run it manually with Playwright

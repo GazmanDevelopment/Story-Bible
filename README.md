@@ -5,7 +5,7 @@ Word task-pane add-in plus a small FastAPI server for keeping a story bible (cha
 - **PLAN.md**: architecture, decisions, build phases, TrueNAS deployment, sideloading
 - **[docs/BACKUP.md](docs/BACKUP.md)** / **[docs/RESTORE.md](docs/RESTORE.md)**: what backs up automatically and how to restore it
 - `app/`: FastAPI backend (`main.py`) and task pane (`static/`)
-- `manifest.xml`: Word add-in manifest (points at https://localhost:3000)
+- `manifest.dev.xml` / `manifest.prod.xml`: Word add-in manifests, generated from `manifest.template.xml` by `scripts/generate_manifest.py` (#8) - edit the template, not the generated files
 - `samples/`: two fictional sample series (import-ready JSON)
 - `tests/`: API test (pytest) and headless UI test (Playwright)
 - `screenshots/`: the pane at task-pane width
