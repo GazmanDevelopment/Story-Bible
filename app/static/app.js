@@ -242,10 +242,11 @@ function relsFor(cid) {
 function relSentence(r) { return `${charName(r.from)} ${r.type} ${charName(r.to)}`; }
 
 // ---------------------------------------------------------------- forms
-function field(key, label, val, type = "text", extra = "") {
+function field(key, label, val, type = "text", extra = "", required = false) {
+  const labelHtml = `${esc(label)}${required ? '<span class="req">*</span>' : ""}`;
   if (type === "textarea")
-    return `<label><span>${esc(label)}</span><textarea data-f="${key}" ${extra}>${esc(val)}</textarea></label>`;
-  return `<label><span>${esc(label)}</span><input type="${type}" data-f="${key}" value="${esc(val)}" ${extra}></label>`;
+    return `<label><span>${labelHtml}</span><textarea data-f="${key}" ${extra}>${esc(val)}</textarea></label>`;
+  return `<label><span>${labelHtml}</span><input type="${type}" data-f="${key}" value="${esc(val)}" ${extra}></label>`;
 }
 function chipPicker(key, all, selected) {
   return `<div class="chips" data-chips="${key}">${all.map((x) =>
@@ -279,7 +280,7 @@ function characterForm(c, isNew) {
   return `<form data-kind="characters">
     <h2>${isNew ? "New character" : esc(c.name)}</h2>
     ${S.inWord && !isNew ? `<div class="toolbar"><button type="button" class="small" data-act="insert" data-text="${esc(c.name)}">Insert name at cursor</button></div>` : ""}
-    <div class="grid2">${field("name", "Name", c.name)}${field("role", "Role", c.role, "text", 'placeholder="e.g. Protagonist"')}</div>
+    <div class="grid2">${field("name", "Name", c.name, "text", "", true)}${field("role", "Role", c.role, "text", 'placeholder="e.g. Protagonist"')}</div>
     ${field("aliases", "Nicknames / aliases (comma separated)", c.aliases)}
     <h3>Basics</h3>
     <div class="grid3">${field("age", "Age at start", c.age, "number")}${field("height", "Height", c.height)}${field("gender", "Gender", c.gender)}</div>
@@ -317,7 +318,7 @@ function characterForm(c, isNew) {
 function locationForm(l, isNew) {
   return `<form data-kind="locations">
     <h2>${isNew ? "New place" : esc(l.name)}</h2>
-    ${field("name", "Name", l.name, "text", 'placeholder="e.g. The lake house"')}
+    ${field("name", "Name", l.name, "text", 'placeholder="e.g. The lake house"', true)}
     ${field("place", "Where", l.place, "text", 'placeholder="e.g. Terrigal, NSW"')}
     ${field("description", "Description", l.description, "textarea", 'rows="4"')}
     ${field("relevance", "Relevance to the story", l.relevance, "textarea")}
@@ -336,7 +337,7 @@ function eventForm(e, isNew) {
     .map((l) => `<option value="${l.id}" ${e.location_id === l.id ? "selected" : ""}>${esc(l.name)}</option>`).join("");
   return `<form data-kind="events">
     <h2>${isNew ? "New event" : esc(e.title)}</h2>
-    ${field("title", "What happens", e.title)}
+    ${field("title", "What happens", e.title, "text", "", true)}
     <h3>When (after ${esc(s.anchor_mode === "date" && s.anchor_date ? s.anchor_date : (s.anchor_label || "story start"))})</h3>
     <div class="grid3">${field("off_y", "Years", e.off_y ?? 0, "number")}${field("off_m", "Months", e.off_m ?? 0, "number")}${field("off_d", "Days", e.off_d ?? 0, "number")}</div>
     <div class="hint" id="whenPreview"></div>
@@ -393,9 +394,9 @@ function feedbackForm(kind) {
   const label = kind === "issue" ? "Log an issue" : "Log a suggestion";
   return `<form data-kind="feedback" data-feedback-kind="${kind}">
     <h2>${label}</h2>
-    ${field("title", "Title", "", "text", 'maxlength="120" placeholder="Short summary"')}
+    ${field("title", "Title", "", "text", 'maxlength="120" placeholder="Short summary"', true)}
     <div class="hint">3–120 characters.</div>
-    ${field("description", "Description", "", "textarea", 'rows="6" maxlength="4000" placeholder="What happened, or what you\'d like to see"')}
+    ${field("description", "Description", "", "textarea", 'rows="6" maxlength="4000" placeholder="What happened, or what you\'d like to see"', true)}
     <div class="formbar"><div></div>
       <div><button type="button" data-act="cancel">Cancel</button>
       <button class="primary" data-act="save-feedback">${label}</button></div></div>
