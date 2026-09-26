@@ -1,5 +1,7 @@
 import os, tempfile
-os.environ["STORYBIBLE_DB"] = tempfile.mktemp(suffix=".db")
+_fd, _db_path = tempfile.mkstemp(suffix=".db")  # not mktemp(): TOCTOU race, CodeQL py/insecure-temporary-file
+os.close(_fd)
+os.environ["STORYBIBLE_DB"] = _db_path
 from fastapi.testclient import TestClient
 from app.main import app
 c = TestClient(app)

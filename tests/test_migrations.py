@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import tempfile
 
@@ -5,7 +6,13 @@ from app.migrations import SCHEMA_VERSION, migrate
 
 
 def _new_db() -> sqlite3.Connection:
-    con = sqlite3.connect(tempfile.mktemp(suffix=".db"))
+    # mkstemp(), not mktemp(): the latter is a TOCTOU race between naming
+    # the file and creating it (CodeQL py/insecure-temporary-file, #28).
+    # sqlite3.connect() is happy to open the pre-created empty file as a
+    # fresh database.
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    con = sqlite3.connect(path)
     con.isolation_level = None  # autocommit; migrate() drives its own transactions
     return con
 

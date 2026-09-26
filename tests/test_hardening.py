@@ -4,7 +4,14 @@ import os
 import sys
 import tempfile
 
-os.environ.setdefault("STORYBIBLE_DB", tempfile.mktemp(suffix=".db"))
+# mkstemp(), not mktemp(): the latter is a TOCTOU race between naming the
+# file and creating it (CodeQL py/insecure-temporary-file, #28). Avoided
+# entirely (rather than mkstemp()-then-discard) when some earlier-imported
+# test module already set STORYBIBLE_DB, which is the common case.
+if "STORYBIBLE_DB" not in os.environ:
+    _fd, _db_path = tempfile.mkstemp(suffix=".db")
+    os.close(_fd)
+    os.environ["STORYBIBLE_DB"] = _db_path
 
 import app.main as main
 from fastapi.testclient import TestClient
