@@ -11,6 +11,10 @@
   <!-- Office.js. Outside Word the page still works as a normal web app. -->
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <script src="vendor/quill/quill.js"></script>
+  <!-- MSAL.js (vendored, not CDN - see app/static/vendor/msal/NOTICE.md,
+       MIT). Sign-in for AUTH_MODE=entra (#13); harmless to load when
+       AUTH_MODE is "none"/"token" - just never used. -->
+  <script src="vendor/msal/msal-browser.min.js"></script>
 </head>
 <body>
   <header id="top">
@@ -18,6 +22,7 @@
       <select id="seriesSelect" title="Series"></select>
       <button id="btnFind" class="icon word-only" title="Look up the selected name in the document">Find</button>
     </div>
+    <div id="authBar" class="linkbar"></div>
     <div id="linkBar" class="linkbar word-only"></div>
     <nav id="tabs">
       <button data-tab="characters">Characters</button>

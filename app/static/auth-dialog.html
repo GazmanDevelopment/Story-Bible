@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in - Story Bible</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="vendor/msal/msal-browser.min.js"></script>
+</head>
+<body>
+  <p>Signing in…</p>
+  <script>
+    /* Only used by Word hosts without nested app auth support (#13) -
+     * everywhere else signs in directly in the task pane. This page runs
+     * in Office's dialog host, which behaves like a normal browser tab, so
+     * the ordinary MSAL redirect flow works: navigate to Entra, come back
+     * here, then hand the resulting account off to the task pane (which
+     * shares this same origin's localStorage MSAL cache) and close.
+     */
+    async function run() {
+      let cfg;
+      try {
+        cfg = await (await fetch("/api/config")).json();
+      } catch (err) {
+        Office.context.ui.messageParent(JSON.stringify({ ok: false, error: "Couldn't reach the server" }));
+        return;
+      }
+      const pca = new msal.PublicClientApplication({
+        auth: {
+          clientId: cfg.clientId,
+          authority: `https://login.microsoftonline.com/${cfg.tenantId}`,
+          redirectUri: window.location.origin + "/auth-dialog.html",
+        },
+        cache: { cacheLocation: "localStorage" },
+      });
+      await pca.initialize();
+      try {
+        const result = await pca.handleRedirectPromise();
+        if (result) {
+          Office.context.ui.messageParent(JSON.stringify({ ok: true }));
+          return;
+        }
+        await pca.loginRedirect({ scopes: [`api://${cfg.clientId}/access_as_user`] });
+        // loginRedirect navigates away; nothing runs past this line until
+        // the browser comes back here and handleRedirectPromise() (above)
+        // picks up the result on the next load.
+      } catch (err) {
+        Office.context.ui.messageParent(JSON.stringify({ ok: false, error: String(err && err.message || err) }));
+      }
+    }
+    // Same defensive pattern as app.js: this page only does anything useful
+    // as a real Office dialog (messageParent has no one to message
+    // otherwise), but it shouldn't throw an unhandled error if opened
+    // without Office.js available (e.g. loaded directly while debugging).
+    if (window.Office && Office.onReady) Office.onReady(run);
+    else document.body.textContent = "This page must be opened as an Office dialog.";
+  </script>
+</body>
+</html>
