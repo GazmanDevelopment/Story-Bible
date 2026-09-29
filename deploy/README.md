@@ -68,6 +68,33 @@ container's internal 8000.
 Already done per #7: the Synology reverse proxy forwards
 `storybible.huscroft.com.au` to `http://<truenas-ip>:2285`.
 
+## Network exposure: only the reverse proxy should reach port 2285
+
+The Custom App publishes **plain HTTP on host port 2285 on every network
+interface of the NAS**. The proxy in step 5 puts TLS in front of it, but nothing
+stops another machine on your LAN (or VPN) from talking to `http://<nas-ip>:2285`
+directly - and anything sent that way, including the sign-in token, travels
+unencrypted, bypassing the proxy entirely.
+
+Close that door so only the Synology can reach the port:
+
+- **Firewall rule (recommended).** On your router / firewall (or a VLAN rule),
+  allow `<synology-ip> -> <nas-ip>:2285` and block everything else to that port.
+  Use whatever device enforces traffic between machines on your network; this
+  repo doesn't assume one.
+- **If the NAS has several network interfaces**, bind the port to the one the
+  proxy uses instead of all of them, by changing the mapping in the Custom App
+  to `"<nas-lan-ip>:2285:8000"`. This narrows *which interface*; it does not
+  narrow *which machines on that network* - it complements the firewall rule,
+  it doesn't replace it.
+- The app itself only trusts `X-Forwarded-*` from the proxy's address
+  (`FORWARDED_ALLOW_IPS`, step 4), so a request that skips the proxy is not
+  mistaken for one that came through it.
+
+**Check it worked:** from a machine that is *not* the Synology, run
+`curl -m 5 http://<nas-ip>:2285/api/health`. It should time out or be refused. From
+the Synology (or via `https://storybible...`) it should answer.
+
 ## 6. Verify
 
 ```
@@ -75,7 +102,7 @@ curl https://storybible.huscroft.com.au/api/health
 ```
 
 should return `{"ok": true, ...}`. If it doesn't, check the Custom App's
-logs in the TrueNAS UI - `hardening_middleware` (`app/main.py`) logs every
+logs in the TrueNAS UI - `HardeningMiddleware` (`app/main.py`) logs every
 request to stdout, which is what those logs show.
 
 ## Snapshots and backups

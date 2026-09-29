@@ -75,6 +75,32 @@ table, not vulnerabilities:
 - Traffic between a LAN-local reverse proxy and this service may be plain
   HTTP, by the operator's choice, on their own network.
 
+Also accepted, each with the reasoning (all added in the #44 audit, #74):
+- **Backups sit in the same dataset as the database, in plaintext.** They are
+  created owner-only (`0700`/`0600`), which protects against other accounts on
+  the host, not against the host's administrator or against losing the pool.
+  Protecting against pool loss means copying them off the box - see
+  [docs/BACKUP.md](docs/BACKUP.md).
+- **`office.js` is loaded from Microsoft's CDN without a Subresource Integrity
+  hash.** Microsoft only supports the floating `/lib/1/hosted/` URL (it is
+  updated in place), so a fixed hash would break the pane whenever they
+  publish. The Content-Security-Policy limits *where* scripts may load from
+  (this host and the app itself). A compromise of that host would run in the
+  pane, with access to whatever the pane can reach.
+- **Sign-in tokens are kept in the browser's `localStorage`** (the MSAL cache,
+  chosen deliberately so the pane stays signed in when Word closes and
+  reopens it; and the legacy shared token, `sb_token`). Script running in the
+  pane could read them. That is why there is no inline script, no `eval`, all
+  rich text is sanitized server-side on write, and the CSP restricts script
+  sources - the exposure is the pane's own XSS surface, kept small on purpose.
+- **A reviewed advisory in a vendored library:** Quill 2.0.3 has CVE-2025-15056
+  (XSS in its HTML *export* feature; no fixed release exists). The pane does not
+  use that feature, and a test fails if it starts to. Vendored JavaScript is
+  re-checked weekly against the npm advisory database
+  (`scripts/check_vendored_js.py`, see `.github/workflows/security-audit.yml`).
+- **The plain-HTTP port (2285) is reachable from the LAN** unless you restrict it;
+  [deploy/README.md](deploy/README.md) ("Network exposure") says how.
+
 If you think one of these is exploitable beyond what's described above (for
 example, a way to reach the service or the database without the access those
 points assume), that's still worth reporting.

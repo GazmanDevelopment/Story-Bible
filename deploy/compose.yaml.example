@@ -27,7 +27,13 @@ services:
     restart: unless-stopped
     user: "568:568"          # TrueNAS SCALE's "apps" user - matches the dataset's owner
     ports:
-      - "2285:8000"           # host:container - port 8000 on this NAS is already used elsewhere
+      # host:container - port 8000 on this NAS is already used elsewhere.
+      # This publishes PLAIN HTTP on every interface of the NAS, and the app's
+      # token / sign-in bearer crosses the LAN unencrypted to anyone who can
+      # reach it directly instead of through the reverse proxy: restrict who
+      # can reach this port to the proxy only - see deploy/README.md,
+      # "Network exposure".
+      - "2285:8000"
     volumes:
       # The dataset itself, mounted directly as /data - not a subdirectory
       # under it. A subdirectory here wouldn't exist yet on first deploy,
@@ -65,5 +71,17 @@ services:
       # MAX_BODY_BYTES, IMPORT_MAX_BODY_BYTES, STORYBIBLE_DB) has a sane
       # default - add here only to override.
     mem_limit: 512m
+    # Hardening (#74). The app only ever writes to /data (the volume above) and
+    # temp files; it needs no privileges and no extra capabilities. The CI
+    # "Container starts and reports healthy" job runs the image with these same
+    # settings, so a change that breaks them is caught there, not on the NAS.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     # No healthcheck block here - the image already defines one (see
     # Dockerfile's HEALTHCHECK); Docker uses it automatically.

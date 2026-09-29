@@ -50,6 +50,17 @@ from pathlib import Path
 from typing import Any
 
 
+def _private(path: Path, mode: int) -> None:
+    """Backups hold every series in plaintext (#74), so keep them owner-only:
+    0700 for folders, 0600 for files, whatever the container's umask was.
+    Best effort - a filesystem that ignores chmod (or Windows) just keeps its
+    defaults rather than failing the backup over it."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 def backup_dir() -> Path:
     env = os.environ.get("BACKUP_DIR", "").strip()
     if env:
@@ -82,6 +93,7 @@ def last_backup_age_seconds() -> float | None:
 def _backup_database(bdir: Path) -> Path:
     from . import main as app_main
     bdir.mkdir(parents=True, exist_ok=True)
+    _private(bdir, 0o700)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     dest = bdir / f"storybible-{stamp}.db"
     # VACUUM INTO refuses to overwrite an existing file, and the timestamp
@@ -101,6 +113,7 @@ def _backup_database(bdir: Path) -> Path:
         con.execute("VACUUM INTO ?", (str(dest),))
     finally:
         con.close()
+    _private(dest, 0o600)
     return dest
 
 
@@ -114,6 +127,8 @@ def _export_json(json_root: Path) -> Path:
     from . import main as app_main
     day_dir = json_root / datetime.now().strftime("%Y%m%d")
     day_dir.mkdir(parents=True, exist_ok=True)
+    _private(json_root, 0o700)
+    _private(day_dir, 0o700)
     # A direct in-process call, not a real request - list_series/bundle's
     # `user` param needs a real CurrentUser. SYSTEM_USER (is_pipeline=True)
     # sees every series regardless of AUTH_MODE/ownership, which a backup
@@ -128,8 +143,14 @@ def _export_json(json_root: Path) -> Path:
             # succeeded) to one series' bad timing.
             app_main.logger.info("backup: series %s vanished mid-export, skipping", s["id"])
             continue
-        safe_name = re.sub(r"[^\w-]+", "_", data["series"].get("name") or "series").strip("_") or "series"
-        (day_dir / f"{safe_name}-{s['id']}.json").write_text(json.dumps(data, indent=2))
+        # Capped: a series name can be up to 1,000 characters (#71) and filesystems
+        # allow ~255 bytes per file name, so an uncapped name here would make
+        # the export - and with it the whole nightly backup - fail with
+        # "File name too long". The series id after it keeps names unique.
+        safe_name = re.sub(r"[^\w-]+", "_", data["series"].get("name") or "series").strip("_")[:60].strip("_") or "series"
+        out = day_dir / f"{safe_name}-{s['id']}.json"
+        out.write_text(json.dumps(data, indent=2))
+        _private(out, 0o600)
     return day_dir
 
 
@@ -177,6 +198,7 @@ def run_backup() -> dict[str, Any]:
             app_main.logger.exception("backup retention (%s) failed", label)
 
     _marker_path().write_text(str(time.time()))
+    _private(_marker_path(), 0o600)
     return {"db_backup": db_backup, "json_dir": json_dir}
 
 

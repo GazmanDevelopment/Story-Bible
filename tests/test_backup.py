@@ -218,3 +218,15 @@ def test_old_health_backup_route_is_gone():
     """Folded into /api/health (#68) - a monitor still pointed at the old URL
     should fail loudly (404), not quietly keep getting some other answer."""
     assert c.get("/api/health/backup").status_code == 404
+
+
+def test_a_very_long_series_name_does_not_break_the_backup(tmp_path, monkeypatch):
+    """Series names can be 1,000 characters (#71); used raw in a file name that
+    overflows the ~255-byte limit and would fail the whole nightly backup."""
+    monkeypatch.setenv("BACKUP_DIR", str(tmp_path))
+    r = c.post("/api/series", json={"data": {"name": "L" * 1000}})
+    assert r.status_code == 200
+    result = backup.run_backup()
+    names = [f.name for f in result["json_dir"].glob("*.json")]
+    assert any(n.startswith("L" * 60) and r.json()["id"] in n for n in names)
+    assert all(len(n.encode()) <= 255 for n in names)
