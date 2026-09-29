@@ -3,7 +3,7 @@
 # Pinned by digest (#74): a tag like 3.12-slim is a moving target, so two builds
 # of the same commit could differ. Dependabot's docker ecosystem proposes new
 # digests. To bump by hand: docker buildx imagetools inspect python:3.12-slim
-FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d
 
 # TrueNAS SCALE's "apps" user/group is 568:568. Running as it means a
 # dataset created with that ownership (issue #6) just works as /data with
