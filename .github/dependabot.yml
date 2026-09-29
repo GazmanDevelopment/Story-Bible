@@ -26,6 +26,18 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    # Stay on the Python line the app is developed and tested on (3.12): CI runs
+    # on 3.12, so an image on 3.14 would no longer be what was tested. Digest
+    # refreshes of python:3.12-slim - the security patches - still arrive as
+    # normal. Moving to a new Python line is a deliberate change: update the
+    # Dockerfile, every setup-python in .github/workflows, and check the
+    # dependencies together (tests/test_supply_chain.py enforces they agree),
+    # then remove this rule.
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
