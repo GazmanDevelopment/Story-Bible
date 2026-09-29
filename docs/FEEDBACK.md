@@ -45,7 +45,10 @@ sign-in, and the deployment is LAN/VPN-only (see `SECURITY.md`):
 - **5 filings per person per hour**, so one person can't use up another's
   allowance (in `none`/`token` mode everyone shares one identity, so it is
   effectively 5 in total).
-- **20 per hour across everyone**, as a ceiling.
+- **20 per hour across everyone**, as a ceiling. The trade-off: a few people
+  filing heavily can use it up for everybody else until the hour rolls over;
+  it exists to bound a compromised account, and is a constant
+  (`RATE_LIMIT_GLOBAL_MAX_CALLS`) if you ever have enough users to need more.
 - **Only filings that actually reached GitHub count.** If GitHub is down or
   rejects the request, that attempt is given back - an outage doesn't lock
   you out of reporting for an hour. (A reply GitHub sent but we couldn't
@@ -56,4 +59,6 @@ Past a cap, filing returns `429` until the window rolls over.
 ## What's *not* sent
 
 Only the title and description you type, plus the version/timestamp
-footer above (and your display name in Entra mode). No document content, no series data, no filesystem paths.
+footer above (and your display name in Entra mode). If your token has no
+real display name (some guest accounts only carry an email address), nothing
+is added - an email address or object id is never published. No document content, no series data, no filesystem paths.

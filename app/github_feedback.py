@@ -59,6 +59,15 @@ RATE_LIMIT_WINDOW_SECONDS = 3600
 OUTBOUND_TIMEOUT_SECONDS = 10  # must not block the single uvicorn worker for long
 
 
+class UnreadableReply(Exception):
+    """GitHub answered 2xx but the body wasn't the JSON we expected. Unlike
+    every other failure, the issue may well have been created - so the
+    rate-limit slot is NOT given back (retrying blindly could file duplicates).
+    A dedicated type, not "some ValueError", so an unrelated error raised
+    before anything was sent (a bad token that can't be encoded into a
+    header, say) is never mistaken for it."""
+
+
 class FeedbackIn(BaseModel):
     kind: Literal["issue", "suggestion"]
     title: LooseStr
@@ -149,6 +158,23 @@ class _RateLimiter:
 _rate_limiter = _RateLimiter(RATE_LIMIT_MAX_CALLS, RATE_LIMIT_WINDOW_SECONDS, RATE_LIMIT_GLOBAL_MAX_CALLS)
 
 
+_GUID = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
+
+
+def _public_name(user: auth.CurrentUser | None) -> str:
+    """The name that may go into a public issue, or "" if there isn't a real
+    one. auth.resolve_entra_user falls back to preferred_username (a UPN, i.e.
+    an email address) and then to the object id when a token has no `name`
+    claim - publishing either would defeat the point of naming only a display
+    name, so anything that is (or looks like) an email or an id is dropped."""
+    if user is None or auth.AUTH_MODE != "entra" or user.is_pipeline:
+        return ""
+    name = (user.display_name or "").strip()
+    if not name or name in (user.email, user.oid) or "@" in name or _GUID.match(name):
+        return ""
+    return name
+
+
 def _submitter_line(name: str) -> str:
     """The issue is public, so only a display name goes in - and it comes from
     the sign-in token, i.e. it is user-controlled text headed for markdown:
@@ -158,6 +184,8 @@ def _submitter_line(name: str) -> str:
     # two words together), then the character filter, then tidy again.
     cleaned = re.sub(r"\s+", " ", name or "")
     cleaned = re.sub(r"[^\w .'\-]", "", cleaned)
+    cleaned = cleaned.replace("_", " ")                       # _emphasis_ / __bold__
+    cleaned = re.sub(r"([-.'])\1{2,}", r"\1", cleaned)         # runs of one punctuation mark
     cleaned = re.sub(r" +", " ", cleaned).strip()[:80]
     return f"\nSubmitted by {cleaned}" if cleaned else ""
 
@@ -194,7 +222,10 @@ async def _post_issue_to_github(
             },
         )
         r.raise_for_status()
-        return r.json()
+        try:
+            return r.json()
+        except ValueError as e:
+            raise UnreadableReply(str(e)) from e
 
 
 async def file_feedback(feedback: FeedbackIn, user: auth.CurrentUser | None = None) -> dict[str, Any]:
@@ -212,22 +243,25 @@ async def file_feedback(feedback: FeedbackIn, user: auth.CurrentUser | None = No
     if not token:
         raise HTTPException(503, "Feedback filing isn't configured on this server")
     key = user.oid if user else ""
-    if user is not None and auth.AUTH_MODE == "entra" and not user.is_pipeline:
-        feedback.submitted_by = user.display_name
+    # Always assigned (to "" when there's no real name), never inherited: the
+    # object may have come from anywhere, and only this function decides who
+    # a filing is attributed to.
+    feedback.submitted_by = _public_name(user)
     ticket = _rate_limiter.reserve(key)
     if ticket is None:
         raise HTTPException(429, "Too many feedback submissions - try again later")
     try:
         result = await _post_issue_to_github(token, feedback)
-    except Exception as e:
+    except BaseException as e:  # BaseException: a cancelled request must give its slot back too
         # The call to GitHub itself failed (network, timeout, or a non-2xx
-        # answer): nothing was filed, so this attempt doesn't count. (A
-        # timeout can in theory have filed one - the per-hour cap makes that
-        # duplicate cheap.) The exception is a ValueError, which is what
-        # r.json() raises on a 2xx we couldn't read: GitHub said yes, so the
-        # issue may well exist, and the slot stays used.
-        if not isinstance(e, ValueError):
+        # answer) or was cancelled: nothing was filed, so this attempt doesn't
+        # count. (A timeout can in theory have filed one - the per-hour cap
+        # makes that duplicate cheap.) The exception is UnreadableReply: GitHub
+        # said yes, so the issue may well exist, and the slot stays used.
+        if not isinstance(e, UnreadableReply):
             _rate_limiter.refund(key, ticket)
+        if not isinstance(e, Exception):
+            raise  # cancellation / shutdown: propagate, don't turn it into a 502
         app_main.logger.error("feedback: GitHub API call failed: %s", e)
         raise HTTPException(502, "Could not reach GitHub. Try again later.")
     try:
