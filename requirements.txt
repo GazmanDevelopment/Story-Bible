@@ -2,6 +2,6 @@
 # bump deliberately, not incidentally, and re-run the full test suite after.
 fastapi==0.141.1
 uvicorn==0.54.0
-pydantic==2.13.4
+pydantic==2.13.5
 pyjwt[crypto]==2.15.0
 httpx==0.28.1        # outbound calls to the GitHub API (app/github_feedback.py, #22)
