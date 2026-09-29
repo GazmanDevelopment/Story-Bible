@@ -7,7 +7,6 @@ health is public" is enforced rather than remembered.
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -88,6 +87,17 @@ def test_every_protected_route_rejects_a_missing_token_in_token_mode(monkeypatch
         assert r.status_code == 401, f"{method} {path} accepted a wrong token"
 
 
+def test_a_valid_token_gets_past_auth_on_every_protected_route(monkeypatch):
+    """Positive control for the tests around it: if a dependency were wired
+    to something that always 401s, the rejection tests would still pass."""
+    monkeypatch.setattr(auth, "AUTH_MODE", "token")
+    monkeypatch.setattr(auth, "TOKEN", "s3cret")
+    c = TestClient(main.app)
+    for method, path in _protected_calls():
+        r = c.request(method, path, json={"data": {}, "role": "editor", "kind": "issue"}, headers={"X-Token": "s3cret"})
+        assert r.status_code not in (401, 403), f"{method} {path} rejected a valid token ({r.status_code})"
+
+
 def test_every_protected_route_rejects_a_missing_bearer_in_entra_mode(monkeypatch):
     monkeypatch.setattr(auth, "AUTH_MODE", "entra")
     c = TestClient(main.app)
@@ -108,16 +118,20 @@ def test_public_routes_answer_without_credentials_in_every_mode(monkeypatch):
 
 
 # ------------------------------------------------- API docs are opt-in (#68)
-def _probe_docs(enable: str | None) -> dict[str, int]:
-    """The flag is read once at import, so check in a fresh interpreter."""
-    env = {k: v for k, v in os.environ.items() if k != "ENABLE_API_DOCS"}
+_APP_ENV_KEYS = (
+    "ENABLE_API_DOCS", "STORYBIBLE_TOKEN", "AUTH_MODE", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS",
+    "LEGACY_OWNER_OID", "GITHUB_FEEDBACK_TOKEN", "BACKUP_DIR", "STORYBIBLE_DB",
+)
+
+
+def _probe_docs(tmp_path, enable: str | None) -> dict[str, int]:
+    """The flag is read once at import, so check in a fresh interpreter with
+    a clean app environment (nothing from the developer's shell or CI)."""
+    import json
+    env = {k: v for k, v in os.environ.items() if k not in _APP_ENV_KEYS}
     if enable is not None:
         env["ENABLE_API_DOCS"] = enable
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    env.update(STORYBIBLE_DB=db_path, PYTHONUTF8="1")
-    env.pop("STORYBIBLE_TOKEN", None)
-    env.pop("AUTH_MODE", None)
+    env.update(STORYBIBLE_DB=str(tmp_path / "probe.db"), PYTHONUTF8="1")
     code = (
         "import json\n"
         "from fastapi.testclient import TestClient\n"
@@ -128,24 +142,23 @@ def _probe_docs(enable: str | None) -> dict[str, int]:
     )
     out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
-    import json
     return json.loads(out.stdout.strip().splitlines()[-1])
 
 
-def test_docs_are_off_by_default():
-    codes = _probe_docs(None)
+def test_docs_are_off_by_default(tmp_path):
+    codes = _probe_docs(tmp_path, None)
     for p in DOC_ROUTES:
         assert codes[p] == 404, f"{p} answered ({codes[p]}) with ENABLE_API_DOCS unset"
     assert codes["/api/health"] == 200 and codes["/"] == 200
 
 
 @pytest.mark.parametrize("value", ["", "false", "0", "no"])
-def test_docs_stay_off_for_falsey_values(value):
-    assert _probe_docs(value)["/docs"] == 404
+def test_docs_stay_off_for_falsey_values(tmp_path, value):
+    assert _probe_docs(tmp_path, value)["/docs"] == 404
 
 
-def test_docs_can_be_switched_on_explicitly():
-    codes = _probe_docs("true")
+def test_docs_can_be_switched_on_explicitly(tmp_path):
+    codes = _probe_docs(tmp_path, "true")
     assert codes["/docs"] == 200 and codes["/redoc"] == 200 and codes["/openapi.json"] == 200
 
 
@@ -169,17 +182,24 @@ def test_health_reprobes_after_the_cache_expires(monkeypatch):
     c = TestClient(main.app)
     c.get("/api/health")
     key = next(iter(main._dir_probe_cache))
-    stamp, ok = main._dir_probe_cache[key]
-    main._dir_probe_cache[key] = (stamp - main._DIR_PROBE_TTL_SECONDS - 1, ok)
+    main._dir_probe_cache[key] -= main._DIR_PROBE_TTL_SECONDS + 1
     c.get("/api/health")
     assert len(calls) == 2
 
 
-def test_a_failed_probe_is_reported_then_recovers(monkeypatch):
+def test_a_failed_probe_is_not_cached_so_recovery_is_immediate(monkeypatch):
     main._dir_probe_cache.clear()
-    monkeypatch.setattr(main, "_data_dir_writable", lambda d: False)
+    results = iter([False, True])
+    monkeypatch.setattr(main, "_data_dir_writable", lambda d: next(results))
     c = TestClient(main.app)
     assert c.get("/api/health").status_code == 503
-    main._dir_probe_cache.clear()  # what the TTL expiring does
-    monkeypatch.undo()
-    assert c.get("/api/health").status_code == 200
+    assert c.get("/api/health").status_code == 200  # no waiting out a TTL after one blip
+
+
+def test_backup_marker_in_the_future_is_not_fresh(tmp_path, monkeypatch):
+    from app import backup
+    monkeypatch.setenv("BACKUP_DIR", str(tmp_path))
+    import time
+    (tmp_path / ".last_success").write_text(str(time.time() + 86400))
+    assert backup.last_backup_age_seconds() < 0
+    assert main._backup_ok() is False

@@ -10,4 +10,6 @@ since the flag is read once at import.
 """
 import os
 
-os.environ.setdefault("ENABLE_API_DOCS", "true")
+# Assigned, not setdefault: a stray ENABLE_API_DOCS=false in the developer's
+# shell would otherwise fail tests/test_openapi.py for an unrelated reason.
+os.environ["ENABLE_API_DOCS"] = "true"

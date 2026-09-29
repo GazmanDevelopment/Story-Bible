@@ -53,6 +53,7 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
@@ -210,7 +211,8 @@ def _data_dir_writable(data_dir: Path) -> bool:
 
 
 _DIR_PROBE_TTL_SECONDS = 5
-_dir_probe_cache: dict[str, tuple[float, bool]] = {}
+_dir_probe_cache: dict[str, float] = {}  # data dir -> monotonic time of last successful probe
+_dir_probe_lock = threading.Lock()
 
 
 def _data_dir_writable_cached(data_dir: Path) -> bool:
@@ -219,13 +221,20 @@ def _data_dir_writable_cached(data_dir: Path) -> bool:
     the server do disk writes as fast as they can send requests (#68).
     Docker polls every 30 s, so a few seconds of caching costs monitoring
     nothing."""
-    key, now = str(data_dir), time.monotonic()
-    hit = _dir_probe_cache.get(key)
-    if hit and now - hit[0] < _DIR_PROBE_TTL_SECONDS:
-        return hit[1]
-    ok = _data_dir_writable(data_dir)
-    _dir_probe_cache[key] = (now, ok)
-    return ok
+    key = str(data_dir)
+    with _dir_probe_lock:  # concurrent requests at expiry must not each probe
+        hit = _dir_probe_cache.get(key)
+        if hit and time.monotonic() - hit < _DIR_PROBE_TTL_SECONDS:
+            return True
+        ok = _data_dir_writable(data_dir)
+        if ok:
+            # Only successes are cached: a failure is reported the moment
+            # the directory recovers, and one transient I/O error can't
+            # keep /api/health at 503 for the whole TTL.
+            _dir_probe_cache[key] = time.monotonic()
+        else:
+            _dir_probe_cache.pop(key, None)
+        return ok
 
 
 def _sanitize_for_log(s: str) -> str:
@@ -258,7 +267,7 @@ def get_current_user(
     authorization: str | None = Header(default=None),
     x_token: str | None = Header(default=None),
 ) -> auth.CurrentUser:
-    """The one auth dependency every /api/* route (other than /api/health*
+    """The one auth dependency every /api/* route (other than /api/health
     and /api/config) takes. Behaviour depends entirely on AUTH_MODE, so
     every existing none/token deployment (and every test written before
     #10 landed) keeps working unchanged - only AUTH_MODE=entra does real
@@ -368,7 +377,7 @@ app = FastAPI(
     version=__version__,
     description="Backend for the Story Bible Word task-pane add-in - characters, places, "
         "relationships and a timeline for a per-series story bible. See PLAN.md in the repo "
-        "for the full data model and the AUTH_MODE options used by `Authorize` above.",
+        "for the full data model and the AUTH_MODE options (send X-Token or a bearer token).",
     openapi_tags=TAGS_METADATA,
     lifespan=lifespan,
     docs_url="/docs" if API_DOCS_ENABLED else None,
@@ -542,7 +551,9 @@ def _backup_ok() -> bool:
     API route is /api/health (plus /api/config, which the pane needs before
     it can sign in)."""
     age = backup_mod.last_backup_age_seconds()
-    return age is not None and age <= MAX_BACKUP_AGE_SECONDS
+    # 0 <= : a marker in the future (clock stepped back, volume restored from
+    # a skewed host) must not read as "fresh" and silence the alert.
+    return age is not None and 0 <= age <= MAX_BACKUP_AGE_SECONDS
 
 
 class HealthResponse(BaseModel):

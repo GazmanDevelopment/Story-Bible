@@ -13,7 +13,7 @@ pointed at the old URL now gets a 404, which is your cue to update it.)
 `https://storybible.huscroft.com.au/api/health` returns, for example:
 
 ```json
-{"ok": true, "auth": true, "version": "0.1.0", "backup_ok": true}
+{"ok":true,"auth":true,"version":"0.1.0","backup_ok":true}
 ```
 
 | Check | How | Healthy | Unhealthy |
@@ -55,7 +55,8 @@ Add two monitors against the same URL, `https://storybible.huscroft.com.au/api/h
    `Story Bible - server`. Heartbeat Interval 60s is plenty.
 2. **Backup freshness**: Monitor Type **HTTP(s) - Keyword**, Friendly Name
    `Story Bible - backup freshness`, Keyword `"backup_ok":true` (exactly
-   that, including the quotes; Kuma alerts when it is *missing*). The
+   that - the response is compact JSON, no spaces; Kuma alerts when it is
+   *missing*). The
    backup check only needs to catch drift over hours, so a 5-10 minute
    interval is fine and cuts log noise.
 
