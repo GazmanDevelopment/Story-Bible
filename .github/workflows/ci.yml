@@ -107,7 +107,7 @@ jobs:
           # needed to write outside /data or /tmp, or to be root, this is
           # where it would fail instead of on the NAS.
           docker run -d --name sb -p 8000:8000 -v sb-data:/data \
-            --user 568:568 --read-only --tmpfs /tmp \
+            --user 568:568 --read-only --tmpfs /tmp:size=128m \
             --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
             story-bible:ci
           # The Dockerfile's HEALTHCHECK only runs its first probe after

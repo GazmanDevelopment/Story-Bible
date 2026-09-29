@@ -29,10 +29,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VENDOR = ROOT / "app" / "static" / "vendor"
 
-# name -> (npm package, folder under app/static/vendor, the file that carries the version)
+# name -> (npm package, folder under app/static/vendor, the vendored file, and a
+# regex for the library's OWN version marker in that file - {v} is the version).
+# Not just "the version string appears somewhere": a bundle can contain other
+# libraries' version literals, so each pattern is the library's own banner/constant.
 LIBRARIES = {
-    "quill": ("quill", "quill", "quill.js"),
-    "msal-browser": ("@azure/msal-browser", "msal", "msal-browser.min.js"),
+    "quill": ("quill", "quill", "quill.js", r'static version="{v}"'),
+    "msal-browser": ("@azure/msal-browser", "msal", "msal-browser.min.js", r"/\*! @azure/msal-browser v{v} "),
 }
 
 # Advisories reviewed and judged not to apply. Each needs a reason that says
@@ -51,7 +54,7 @@ KNOWN_ADVISORIES = {
 
 def notice_version(library: str) -> str:
     """The version a library's NOTICE.md records, e.g. '(v2.0.3)' -> '2.0.3'."""
-    _, folder, _ = LIBRARIES[library]
+    _, folder, _, _ = LIBRARIES[library]
     text = (VENDOR / folder / "NOTICE.md").read_text(encoding="utf-8")
     m = re.search(r"\(v(\d+(?:\.\d+)+)\)", text)
     if not m:
@@ -61,17 +64,17 @@ def notice_version(library: str) -> str:
 
 def consistency_problems() -> list[str]:
     problems = []
-    for library, (_, folder, filename) in LIBRARIES.items():
+    for library, (_, folder, filename, marker) in LIBRARIES.items():
         try:
             version = notice_version(library)
         except (OSError, ValueError) as e:
             problems.append(f"{library}: {e}")
             continue
         body = (VENDOR / folder / filename).read_text(encoding="utf-8", errors="replace")
-        if f'"{version}"' not in body:
+        if not re.search(marker.format(v=re.escape(version)), body):
             problems.append(
-                f"{library}: NOTICE.md says {version} but {folder}/{filename} contains no \"{version}\" - "
-                "was the file replaced without updating the notice?")
+                f"{library}: NOTICE.md says {version} but {folder}/{filename} has no matching version marker "
+                f"(expected /{marker.format(v=version)}/) - was the file replaced without updating the notice?")
     return problems
 
 
@@ -91,29 +94,49 @@ def unreviewed_advisories(audit_json: dict) -> dict[str, str]:
     return {k: v for k, v in advisory_ids(audit_json).items() if k not in KNOWN_ADVISORIES}
 
 
+def report_problem(report: object) -> str | None:
+    """Why an `npm audit --json` result can't be trusted as a clean bill of health,
+    or None if it's a genuine audit report. npm prints a JSON *error* object when
+    it can't reach the registry; treating any parseable JSON as a report would let
+    a failed audit look like 'no advisories' (a fail-open in a security gate)."""
+    if not isinstance(report, dict):
+        return "not a JSON object"
+    if "error" in report:
+        return f"npm reported an error: {json.dumps(report['error'])[:300]}"
+    if "auditReportVersion" not in report or "vulnerabilities" not in report or "metadata" not in report:
+        return "missing auditReportVersion/vulnerabilities/metadata, so it does not look like a completed audit"
+    return None
+
+
 def run_npm_audit() -> dict:
     npm = shutil.which("npm")
     if not npm:
         raise SystemExit("npm not found - install Node.js to run --audit")
-    specs = [f"{pkg}@{notice_version(lib)}" for lib, (pkg, _, _) in LIBRARIES.items()]
+    specs = [f"{pkg}@{notice_version(lib)}" for lib, (pkg, _, _, _) in LIBRARIES.items()]
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, "package.json").write_text(
             json.dumps({"name": "vendored-js-audit", "version": "0.0.0", "private": True}), encoding="utf-8")
         common = dict(cwd=tmp, capture_output=True, text=True, timeout=300)
         # Only builds a lockfile of the exact vendored versions; nothing is installed or run.
-        subprocess.run([npm, "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", *specs],
-                       check=True, **common)
+        install = subprocess.run(
+            [npm, "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund", *specs], **common)
+        if install.returncode != 0:
+            raise SystemExit(f"AUDIT NOT RUN - npm could not resolve {specs}:\n{install.stderr}")
         result = subprocess.run([npm, "audit", "--json"], **common)  # exits non-zero when it finds anything
         try:
-            return json.loads(result.stdout)
+            report = json.loads(result.stdout)
         except json.JSONDecodeError:
-            raise SystemExit(f"npm audit gave no usable output:\n{result.stdout}\n{result.stderr}")
+            raise SystemExit(f"AUDIT NOT RUN - npm audit gave no usable output:\n{result.stdout}\n{result.stderr}")
+        problem = report_problem(report)
+        if problem:
+            raise SystemExit(f"AUDIT NOT RUN - {problem}")
+        return report
 
 
 def latest_versions() -> dict[str, str]:
     npm = shutil.which("npm")
     out = {}
-    for lib, (pkg, _, _) in LIBRARIES.items():
+    for lib, (pkg, _, _, _) in LIBRARIES.items():
         r = subprocess.run([npm, "view", pkg, "version"], capture_output=True, text=True, timeout=60)
         out[lib] = r.stdout.strip() or "?"
     return out

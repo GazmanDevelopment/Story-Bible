@@ -8,6 +8,13 @@ import re
 import stat
 from pathlib import Path
 
+import tempfile
+
+if "STORYBIBLE_DB" not in os.environ:   # same pattern as every other test module: app.main reads this at import
+    _fd, _db_path = tempfile.mkstemp(suffix=".db")
+    os.close(_fd)
+    os.environ["STORYBIBLE_DB"] = _db_path
+
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,10 +47,11 @@ def test_every_action_is_pinned_to_a_full_commit_sha_with_a_version_comment(wf, 
 
 
 def test_actions_cache_is_no_longer_the_node20_release():
-    """#76: actions/cache@v4 runs on Node 20, which GitHub is retiring."""
+    """#76: actions/cache v4 runs on Node 20, which GitHub is retiring; v5+ run on Node 24.
+    (Checks 'v5 or later', not a particular SHA, so a Dependabot bump doesn't fail it.)"""
     ci = _text(".github/workflows/ci.yml")
-    assert "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6" in ci
-    assert not re.search(r"actions/cache@v[0-4]\b", ci)
+    m = re.search(r"uses: actions/cache@[0-9a-f]{40} # v(\d+)", ci)
+    assert m and int(m.group(1)) >= 5, "actions/cache should be pinned at v5 or later"
 
 
 def test_the_manifest_validator_is_pinned_to_a_version():
@@ -54,10 +62,12 @@ def test_the_manifest_validator_is_pinned_to_a_version():
 
 # -------------------------------------------------------- Dependabot + audits
 def test_dependabot_covers_python_docker_and_actions_weekly():
-    cfg = _text(".github/dependabot.yml")
-    for ecosystem in ("pip", "docker", "github-actions"):
-        assert f"package-ecosystem: {ecosystem}" in cfg
-    assert cfg.count("interval: weekly") == 3
+    blocks = {}
+    for block in _text(".github/dependabot.yml").split("- package-ecosystem:")[1:]:
+        blocks[block.split()[0]] = block
+    assert {"pip", "docker", "github-actions"} <= set(blocks)
+    for name in ("pip", "docker", "github-actions"):
+        assert re.search(r"interval:\s*weekly", blocks[name]), f"{name} isn't checked weekly"
 
 
 def test_the_audit_workflow_scans_python_and_vendored_js_on_a_schedule():
@@ -96,7 +106,7 @@ def test_compose_template_is_hardened():
     for setting in HARDENING:
         assert setting in live, f"{setting} missing from deploy/compose.yaml.example"
     assert re.search(r"cap_drop:\s*\n\s*-\s*ALL", live)
-    assert re.search(r"tmpfs:\s*\n\s*-\s*/tmp", live)
+    assert re.search(r"tmpfs:\s*\n\s*-\s*/tmp:size=\d+m", live)   # an explicit size, not Docker's default
     assert 'user: "568:568"' in live
 
 
@@ -104,7 +114,7 @@ def test_ci_runs_the_container_with_the_same_hardening_as_compose():
     """If the app ever needed a writable root fs or extra privileges, CI - not the NAS - should find out."""
     ci = _text(".github/workflows/ci.yml")
     run = ci[ci.index("docker run -d"):ci.index("story-bible:ci\n", ci.index("docker run -d"))]
-    for flag in ("--read-only", "--tmpfs /tmp", "--cap-drop ALL", "--security-opt no-new-privileges:true",
+    for flag in ("--read-only", "--tmpfs /tmp:size=128m", "--cap-drop ALL", "--security-opt no-new-privileges:true",
                  "--pids-limit 256", "--user 568:568"):
         assert flag in run, f"CI's container run lacks {flag}"
 
@@ -143,7 +153,6 @@ def test_entra_notes_file_is_ignored_in_either_spelling(ignore_file):
 # ------------------------------------------------- backup file modes (F24)
 @pytest.mark.skipif(os.name == "nt", reason="POSIX file modes")
 def test_backups_are_created_owner_only(tmp_path, monkeypatch):
-    os.environ.setdefault("STORYBIBLE_DB", str(tmp_path / "unused.db"))
     from app import backup, main
     monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "bk"))
     old_umask = os.umask(0o022)   # a permissive umask, to prove the app doesn't rely on the environment's
@@ -165,7 +174,6 @@ def test_backup_asks_for_owner_only_modes_on_every_artifact(tmp_path, monkeypatc
     """Platform-independent twin of the test above: records the chmod calls
     rather than checking the resulting file modes, so it also runs where
     chmod is a no-op (Windows)."""
-    os.environ.setdefault("STORYBIBLE_DB", str(tmp_path / "unused.db"))
     from app import backup, main
     monkeypatch.setenv("BACKUP_DIR", str(tmp_path / "bk"))
     with main.db() as con:   # make sure at least one series exists, so a JSON export file is produced
@@ -183,3 +191,31 @@ def test_backup_asks_for_owner_only_modes_on_every_artifact(tmp_path, monkeypatc
     assert asked[bk / ".last_success"] == 0o600
     exports = list(result["json_dir"].glob("*.json"))
     assert exports and all(asked[f] == 0o600 for f in exports)
+
+
+def test_backup_folders_are_created_owner_only_not_tightened_afterwards(tmp_path, monkeypatch):
+    """The window between 'file written' and 'chmod' must not exist for a folder
+    that is private from the moment it appears - so folders are mkdir'd 0700."""
+    from app import backup
+    made = []
+    real_mkdir = Path.mkdir
+    monkeypatch.setattr(Path, "mkdir", lambda self, mode=0o777, parents=False, exist_ok=False:
+                        (made.append((self, mode)), real_mkdir(self, mode, parents, exist_ok))[1])
+    backup._private_dir(tmp_path / "a" / "b" / "c")
+    assert [m for _, m in made] == [0o700, 0o700, 0o700] and [p.name for p, _ in made] == ["a", "b", "c"]
+
+
+def test_a_failed_chmod_is_logged_not_silent(tmp_path, monkeypatch):
+    import io
+    import logging
+
+    from app import backup, main
+    monkeypatch.setattr(backup.os, "chmod", lambda p, m: (_ for _ in ()).throw(PermissionError("no")))
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    main.logger.addHandler(handler)
+    try:
+        backup._private(tmp_path, 0o700)     # must not raise...
+    finally:
+        main.logger.removeHandler(handler)
+    assert "couldn't restrict" in buf.getvalue()   # ...but must not be silent either

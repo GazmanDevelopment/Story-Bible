@@ -77,7 +77,11 @@ services:
     # settings, so a change that breaks them is caught there, not on the NAS.
     read_only: true
     tmpfs:
-      - /tmp
+      # In-memory scratch space (counts toward mem_limit). Explicit size, so it's a
+      # decision rather than a default: the app keeps request bodies in memory and
+      # SQLite's temp files are small, so 128 MB is generous. If a huge library
+      # ever hits "database or disk is full" during a backup, raise this.
+      - /tmp:size=128m
     cap_drop:
       - ALL
     security_opt:
