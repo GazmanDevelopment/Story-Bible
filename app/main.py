@@ -1267,7 +1267,7 @@ async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends
     outbound HTTPS call (httpx.AsyncClient) rather than blocking the
     single uvicorn worker on it."""
     feedback = feedback_mod.validate_feedback(body)
-    return await feedback_mod.file_feedback(feedback)
+    return await feedback_mod.file_feedback(feedback, user)
 
 
 # ---- static task pane

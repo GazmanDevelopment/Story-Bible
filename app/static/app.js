@@ -799,6 +799,9 @@ function feedbackForm(kind) {
     ${field("title", "Title", "", "text", 'maxlength="120" placeholder="Short summary"', true)}
     <div class="hint">3–120 characters.</div>
     ${field("description", "Description", "", "textarea", 'rows="6" maxlength="4000" placeholder="What happened, or what you\'d like to see"', true)}
+    <div class="hint" data-role="public-notice"><b>This is posted as a public GitHub issue</b>, so anyone can read it.
+      Don't include story text, character or place names from your series, or anything private.${
+        S.config?.authMode === "entra" ? " Your display name is added to it." : ""}</div>
     <div class="formbar"><div></div>
       <div><button type="button" data-act="cancel">Cancel</button>
       <button class="primary" data-act="save-feedback">${label}</button></div></div>

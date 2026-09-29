@@ -7,17 +7,22 @@ no GitHub account needed for whoever's using the pane.
 ## How it works
 
 The pane sends the title/description you type to `POST /api/feedback` (the
-same `X-Token`/`STORYBIBLE_TOKEN` auth every other `/api/*` call already
-needs - it isn't a new, separately-open endpoint). The **server** holds a
+same sign-in every other `/api/*` call already needs - it isn't a new,
+separately-open endpoint). The **server** holds a
 GitHub token and files the issue on your behalf:
 
 - **Log Issue** → labelled `bug`, `area:pane`
 - **Log Suggestion** → labelled `enhancement`, `area:pane`
 
 A short footer is appended to the issue body noting it was filed from the
-pane, the app version, and when. Nothing about who submitted it is
-recorded yet - once Entra sign-in (#9/#10) lands, that'll change the same
-way `created_by`/`updated_by` get added to records.
+pane, the app version, and when. In Entra mode it also says
+`Submitted by <your display name>`.
+
+**The repository is public, so everything filed here is world-readable.** The
+form says so, next to the description box. Only the *display name* is added -
+never your email address or object id - and it is cleaned first (letters,
+digits, spaces and a little punctuation; no markdown, mentions or links). In
+`none`/`token` mode there is no real identity to name, so nothing is added.
 
 ## Setup: `GITHUB_FEEDBACK_TOKEN`
 
@@ -33,13 +38,22 @@ referenced by any static file or the manifest.
 
 ## Rate limiting
 
-A small in-process limit (5 filings/hour by default) guards against an
-accidental double-submit, not abuse from a stranger - this endpoint already
-sits behind `STORYBIBLE_TOKEN`, and the deployment is LAN/VPN-only with a
-couple of known users (see `SECURITY.md`). Past the cap, filing returns
-`429` until the window rolls over.
+A small in-process limit guards against an accidental double-submit or one
+misbehaving account, not abuse from a stranger - this endpoint sits behind
+sign-in, and the deployment is LAN/VPN-only (see `SECURITY.md`):
+
+- **5 filings per person per hour**, so one person can't use up another's
+  allowance (in `none`/`token` mode everyone shares one identity, so it is
+  effectively 5 in total).
+- **20 per hour across everyone**, as a ceiling.
+- **Only filings that actually reached GitHub count.** If GitHub is down or
+  rejects the request, that attempt is given back - an outage doesn't lock
+  you out of reporting for an hour. (A reply GitHub sent but we couldn't
+  read keeps its slot, since the issue may have been created.)
+
+Past a cap, filing returns `429` until the window rolls over.
 
 ## What's *not* sent
 
 Only the title and description you type, plus the version/timestamp
-footer above. No document content, no series data, no filesystem paths.
+footer above (and your display name in Entra mode). No document content, no series data, no filesystem paths.
