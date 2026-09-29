@@ -354,8 +354,10 @@ def upsert_user(con: sqlite3.Connection, user: auth.CurrentUser) -> bool:
 LAST_SEEN_REFRESH_SECONDS = 300
 # (DB path, oid) -> (email, display name, monotonic time of the last write).
 # Per process, which is right for this app's single worker; a second worker
-# would just do one extra write. Keyed by DB path so a test or a restore that
-# swaps the database can't be fooled by an entry for the old one.
+# would just do one extra write. Keyed by DB path so tests (and anything else
+# that points the app at a different file) get their own entries. Replacing the
+# database file underneath a RUNNING process is not supported anyway - restart
+# it, which also clears this - see docs/RESTORE.md.
 _seen_users: dict[tuple[str, str], tuple[str, str, float]] = {}
 
 
@@ -621,7 +623,25 @@ class HardeningMiddleware:
 # Compress responses over 1 KB when the client accepts gzip (#72): a large
 # bundle is JSON and shrinks ~85x, which is most of the transfer time over a
 # VPN or the reverse proxy. Added first so it sits inside HardeningMiddleware.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
+class SelectiveGZip:
+    """GZipMiddleware, except for /assets/ (the PNG icons): already
+    compressed, so gzip would burn CPU on the single worker for nothing.
+    (Compressing API JSON is safe against BREACH-style attacks here: auth is
+    a header, not a cookie, so another site can't make a victim's browser
+    send an authenticated request whose size an observer could then probe.)"""
+
+    def __init__(self, app):
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1024)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/assets/"):
+            await self.app(scope, receive, send)
+        else:
+            await self.gzip(scope, receive, send)
+
+
+app.add_middleware(SelectiveGZip)
 app.add_middleware(HardeningMiddleware)
 
 
@@ -724,16 +744,6 @@ def accessible_series_rows(con, user: auth.CurrentUser, columns: str = "*") -> l
         f"SELECT {columns} FROM series WHERE owner_oid=? OR id IN (SELECT series_id FROM members WHERE oid=?)",
         (user.oid, user.oid),
     ).fetchall()
-
-
-def accessible_series_ids(con, user: auth.CurrentUser) -> set[str] | None:
-    """None means "don't filter" - every non-entra caller, and the
-    read-only review pipeline, which can see every series."""
-    if auth.AUTH_MODE != "entra" or user.is_pipeline:
-        return None
-    owned = {r["id"] for r in con.execute("SELECT id FROM series WHERE owner_oid=?", (user.oid,))}
-    member = {r["series_id"] for r in con.execute("SELECT series_id FROM members WHERE oid=?", (user.oid,))}
-    return owned | member
 
 
 # ------------------------------------------------------- concurrency (#12)
@@ -933,7 +943,10 @@ def bundle_etag(con, series_row: sqlite3.Row) -> str:
     appear in the bundle's `people` map). Every write bumps a version, so
     anything that would change the bundle changes this; nothing here parses a
     record's JSON. Weak (`W/`): the body also carries an `exported` timestamp,
-    so it is equivalent, not byte-identical, between responses."""
+    so it is equivalent, not byte-identical, between responses. Cost is one
+    pass over (id, version) for the series plus the users table (a handful of
+    rows); a display-name change invalidates every series' validator, which
+    only costs those clients one re-download."""
     h = hashlib.blake2b(digest_size=16)
     h.update(f"{__version__}|{series_row['id']}|{series_row['version']}|{series_row['owner_oid']}".encode())
     for r in con.execute("SELECT id, version FROM records WHERE series_id=? ORDER BY id", (series_row["id"],)):
@@ -962,6 +975,8 @@ def export_bundle(series_id: str, user: auth.CurrentUser) -> dict[str, Any]:
 def _etag_matches(header: str | None, etag: str) -> bool:
     if not header:
         return False
+    if header.strip() == "*":  # "if the resource exists at all" - it does, access was checked above
+        return True
     bare = etag.removeprefix("W/")
     return any(t.strip().removeprefix("W/") == bare for t in header.split(","))
 
@@ -1018,14 +1033,7 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
         # Only series this caller can see: comparing against everyone's
         # made the "(imported)" suffix reveal that somebody else has a
         # series with this name (#70).
-        visible = accessible_series_ids(con, user)
-        if visible is None:
-            rows = con.execute("SELECT data FROM series").fetchall()
-        else:
-            rows = con.execute(
-                f"SELECT data FROM series WHERE id IN ({','.join('?' * len(visible))})", tuple(visible)
-            ).fetchall()
-        existing = {json.loads(r["data"]).get("name") for r in rows}
+        existing = {r["name"] for r in accessible_series_rows(con, user, "json_extract(data, '$.name') AS name")}
     if sdata["name"] in existing:
         suffix = " (imported)"
         sdata["name"] = sdata["name"][: MAX_SHORT - len(suffix)] + suffix  # stay inside the name limit

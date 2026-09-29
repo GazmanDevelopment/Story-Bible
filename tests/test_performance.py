@@ -240,8 +240,10 @@ def test_multiple_and_weak_prefixed_validators_match():
     etag = _etag(h, sid)
     for header in (etag, etag.removeprefix("W/"), f'"nope", {etag}', f"W/\"nope\" , {etag} "):
         assert c.get(f"/api/series/{sid}/bundle", headers={**h, "If-None-Match": header}).status_code == 304, header
-    for header in ('"nope"', "", "garbage", "*"):
+    for header in ('"nope"', "", "garbage"):
         assert c.get(f"/api/series/{sid}/bundle", headers={**h, "If-None-Match": header}).status_code == 200, header
+    # "*" means "if it exists at all" (RFC 9110) - it does, and access was already checked
+    assert c.get(f"/api/series/{sid}/bundle", headers={**h, "If-None-Match": "*"}).status_code == 304
 
 
 def test_a_valid_etag_does_not_bypass_access_control():
@@ -334,3 +336,23 @@ def test_the_indexes_migration_upgrades_an_existing_database(tmp_path, monkeypat
     assert con.execute("PRAGMA user_version").fetchone()[0] == len(migrations.MIGRATIONS)
     migrations.migrate(con)  # and re-running is a no-op
     con.close()
+
+
+def test_image_assets_are_not_recompressed():
+    r = c.get("/assets/icon-128.png", headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200 and "content-encoding" not in r.headers
+
+
+def test_error_responses_from_the_outer_middleware_keep_their_headers_with_gzip_in_the_chain(monkeypatch):
+    monkeypatch.setattr(main, "MAX_BODY_BYTES", 10)
+    r = c.post("/api/series", json={"data": {"name": "longer than ten bytes"}}, headers={**_as("perf-u"), "Accept-Encoding": "gzip"})
+    assert r.status_code == 413
+    assert r.headers["cache-control"] == "no-store" and r.headers["x-content-type-options"] == "nosniff"
+
+
+def test_import_finds_name_collisions_only_among_visible_series_using_sql():
+    owner, other = _as("perf-v"), _as("perf-w")
+    c.post("/api/series", json={"data": {"name": "Collide"}}, headers=owner)
+    c.post("/api/series", json={"data": {"name": "Only Theirs"}}, headers=other)
+    assert c.post("/api/import", json={"series": {"name": "Collide"}}, headers=owner).json()["name"] == "Collide (imported)"
+    assert c.post("/api/import", json={"series": {"name": "Only Theirs"}}, headers=owner).json()["name"] == "Only Theirs"

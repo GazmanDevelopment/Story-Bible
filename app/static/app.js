@@ -307,16 +307,14 @@ async function loadSeriesList() {
   // series' full settings can be very large (#72).
   S.seriesList = await api("/series?summary=true");
 }
-// Returns true if S.b was replaced. `revalidate` sends the last ETag so an
-// unchanged series costs a bodyless 304 instead of the whole bundle (#72).
-async function loadBundle({ revalidate = false } = {}) {
-  if (!S.sid) { S.b = null; S.bEtag = null; return true; }
+// Bumped whenever S.b is replaced or patched, so a background request that
+// was already in flight can tell its answer is out of date and drop it (#72).
+let bundleGen = 0;
+async function loadBundle() {
+  if (!S.sid) { S.b = null; S.bEtag = null; bundleGen++; return; }
   const out = {};
-  const r = await api(`/series/${S.sid}/bundle`, "GET", undefined,
-    { ifNoneMatch: revalidate && S.b && S.bEtag ? S.bEtag : undefined, etagOut: out });
-  if (r === NOT_MODIFIED) return false;
-  S.b = r; S.bEtag = out.etag || null;
-  return true;
+  const r = await api(`/series/${S.sid}/bundle`, "GET", undefined, { etagOut: out });
+  S.b = r; S.bEtag = out.etag || null; bundleGen++;
 }
 // #72: after a save/add the server's response is the record itself, so patch
 // local state from it instead of re-downloading the whole bundle. (Deletes
@@ -325,19 +323,30 @@ async function loadBundle({ revalidate = false } = {}) {
 function putLocal(kind, record) {
   const list = S.b[kind], i = list.findIndex((x) => x.id === record.id);
   if (i >= 0) list[i] = record; else list.push(record);
-  S.bEtag = null;
+  S.bEtag = null; bundleGen++;
 }
 // Pick up other people's changes without a reload: on window focus, tab
 // switch or coming back to the pane. Only ever when no form is open - a
 // form holds the version it was loaded at, and swapping the data under it
 // would let a save silently overwrite someone else's edit (defeating #12).
 let lastRevalidate = 0;
+const formOpen = () => !!(S.view || $("#main form") || !$("#modalOverlay").hidden);
 async function revalidateBundle() {
-  if (!S.sid || !S.b || S.view || $("#main form") || !$("#modalOverlay").hidden) return;
+  if (!S.sid || !S.b || formOpen()) return;
   if (Date.now() - lastRevalidate < 15000) return;
   lastRevalidate = Date.now();
-  try { if (await loadBundle({ revalidate: true }) && !S.view && !$("#main form")) render(); }
-  catch { /* a background refresh: stay quiet, the next real action will surface any error */ }
+  const sid = S.sid, gen = bundleGen, out = {};
+  try {
+    const r = await api(`/series/${sid}/bundle`, "GET", undefined, { ifNoneMatch: S.bEtag || undefined, etagOut: out });
+    // Re-check AFTER the round trip, before touching any state: in that time
+    // the user may have opened a form (a save from it would then carry the
+    // refreshed version with stale field values and overwrite someone's edit
+    // without a 409), saved something (this answer predates it), or switched
+    // series. Any of those means this response is discarded.
+    if (r === NOT_MODIFIED || S.sid !== sid || bundleGen !== gen || formOpen()) return;
+    S.b = r; S.bEtag = out.etag || null; bundleGen++;
+    render();
+  } catch { /* a background refresh: stay quiet, the next real action will surface any error */ }
 }
 async function selectSeries(id) {
   S.sid = id || null; S.view = null; lsSet("sb_series", S.sid || "");
@@ -830,7 +839,7 @@ async function onClick(ev) {
     switch (act) {
       case "open": S.view = { kind: t.dataset.kind, id: t.dataset.id }; render(); window.scrollTo(0, 0); break;
       case "new": S.view = { kind: t.dataset.kind, id: null }; render(); break;
-      case "cancel": if (!(await confirmDiscard())) return; S.view = null; render(); break;
+      case "cancel": if (!(await confirmDiscard())) return; S.view = null; render(); revalidateBundle(); break;
       case "chip": t.classList.toggle("on"); break;
       case "modal-cancel": closeModal(false); break;
       case "modal-confirm": closeModal(true); break;
@@ -863,7 +872,7 @@ async function onClick(ev) {
       case "del-rel": {
         await api(`/series/${S.sid}/relationships/${t.dataset.id}`, "DELETE");
         // Nothing references a relationship, so there's no server cascade to fetch.
-        S.b.relationships = S.b.relationships.filter((x) => x.id !== t.dataset.id); S.bEtag = null;
+        S.b.relationships = S.b.relationships.filter((x) => x.id !== t.dataset.id); S.bEtag = null; bundleGen++;
         render(); break;
       }
       case "add-chapter": {
@@ -939,7 +948,7 @@ async function save(kind, form) {
       return;
     }
     // The PUT returns the saved series: patch the bundle and the picker from it (#72).
-    S.b.series = saved; S.bEtag = null;
+    S.b.series = saved; S.bEtag = null; bundleGen++;
     const inList = S.seriesList.find((s) => s.id === saved.id);
     if (inList) {
       Object.assign(inList, { name: saved.name, version: saved.version, updated: saved.updated });

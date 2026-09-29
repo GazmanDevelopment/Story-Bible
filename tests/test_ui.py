@@ -553,3 +553,60 @@ def test_background_refresh_skips_the_series_settings_form_too(server, browser_p
     assert not calls, calls
     assert pg.input_value("[data-f=name]") == "Half-typed name"
     assert not errors, errors
+
+
+def test_a_refresh_that_lands_after_a_form_opened_is_discarded(server, browser_page):
+    """The race: a background refresh is already in flight when the user opens
+    a record. When the answer arrives it must NOT replace the data under the
+    now-open form - otherwise Save would send the refreshed version with the
+    stale field values and silently overwrite the other person's edit."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    original = pg.evaluate("rec('characters', S.b.characters.find(c => c.name === 'Betsy Marr').id).version")
+    pg.evaluate("""async () => {
+        const c = S.b.characters.find(x => x.name === 'Betsy Marr');
+        await fetch(`/api/series/${S.sid}/characters/${c.id}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ data: { ...c, role: 'Changed elsewhere' }, version: c.version }) });
+    }""")
+    held = []
+    pg.route("**/api/series/*/bundle", lambda route: held.append(route))
+    pg.evaluate("() => { lastRevalidate = 0; revalidateBundle(); }")   # fire and forget: the response is held
+    for _ in range(50):
+        if held:
+            break
+        pg.wait_for_timeout(100)
+    assert held, "the background refresh never went out"
+
+    pg.click("text=Betsy Marr")                      # the form opens from the OLD data while the refresh is in flight
+    pg.wait_for_selector("form[data-kind=characters]")
+    pg.fill("[data-f=role]", "My edit")
+    held[0].continue_()                              # ...now the (newer) answer arrives
+    pg.wait_for_timeout(500)
+
+    assert pg.evaluate("rec('characters', S.view.id).version") == original     # not swapped in
+    assert pg.input_value("[data-f=role]") == "My edit"
+    pg.unroute("**/api/series/*/bundle")
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")                        # so the conflict is still caught
+    assert "Changed by" in pg.inner_text("#modalMessage")
+    unexpected = [e for e in errors if "409" not in e]
+    assert not unexpected, unexpected
+
+
+def test_leaving_a_form_looks_for_other_peoples_changes(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    pg.evaluate("""async () => {
+        await fetch(`/api/series/${S.sid}/characters`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ data: { name: 'Added While You Were Editing' } }) });
+        lastRevalidate = 0;
+    }""")
+    pg.click("[data-act=cancel]")
+    pg.wait_for_selector("text=Added While You Were Editing")
+    assert not errors, errors
