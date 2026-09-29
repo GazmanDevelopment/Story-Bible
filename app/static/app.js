@@ -960,7 +960,7 @@ function wire() {
     if (t.id === "importFile" && t.files[0]) {
       try {
         const r = await api("/import", "POST", JSON.parse(await t.files[0].text()));
-        await loadSeriesList(); await selectSeries(r.id); toast("Imported");
+        await loadSeriesList(); await selectSeries(r.id); toast(r.dropped_references ? `Imported - ${r.dropped_references} broken link${r.dropped_references === 1 ? "" : "s"} removed` : "Imported");
       } catch (err) { toast("Import failed: " + err.message, "error"); }
     }
   });

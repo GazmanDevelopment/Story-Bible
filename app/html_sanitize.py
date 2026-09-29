@@ -30,7 +30,18 @@ VOID_TAGS = {"br", "img"}
 DROP_CONTENT_TAGS = {"script", "style", "iframe", "object", "embed", "template"}
 
 _SAFE_LINK_SCHEMES = {"http", "https", "mailto"}
-_SAFE_IMG_SCHEMES = {"http", "https", "data"}
+# https, not http: the pane is served over https, where browsers block or
+# upgrade plain-http images anyway, so allowing them only added a way to make
+# a viewer's browser contact an arbitrary plain-text host (#71).
+_SAFE_IMG_SCHEMES = {"https", "data"}
+
+# Bounds on what the sanitizer will process (#71). Ordinary rich text has a
+# few tags per paragraph; these are far above any real entry and exist so a
+# hostile body can't make the parser burn seconds of CPU (2 MB of "<" took
+# ~1.5 s and expanded 4x when escaped). Exceeding them is a rejected write,
+# not silent truncation.
+MAX_TAGS = 20_000
+MAX_DEPTH = 100
 # The app's own pipeline only ever produces canvas re-encoded PNG/JPEG data
 # URLs (see compressImage() in app.js) - excluding image/svg+xml here (unlike
 # a generic image allowlist) closes off SVG's own script/event-handler
@@ -72,6 +83,7 @@ class _Sanitizer(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.out: list[str] = []
         self._drop_depth = 0  # nesting depth inside a DROP_CONTENT_TAGS element
+        self._depth = 0       # currently open allowed, non-void tags
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._open(tag, attrs)
@@ -101,6 +113,10 @@ class _Sanitizer(HTMLParser):
                 return
             alt = escape(amap.get("alt", ""), quote=True)
             kept = f' src="{escape(src, quote=True)}" alt="{alt}"'
+        if tag not in VOID_TAGS:
+            self._depth += 1
+            if self._depth > MAX_DEPTH:
+                raise ValueError(f"is nested more than {MAX_DEPTH} levels deep")
         self.out.append(f"<{tag}{kept}>")
 
     def handle_endtag(self, tag: str) -> None:
@@ -111,6 +127,7 @@ class _Sanitizer(HTMLParser):
         if self._drop_depth:
             return
         if tag in ALLOWED_TAGS and tag not in VOID_TAGS:
+            self._depth = max(0, self._depth - 1)
             self.out.append(f"</{tag}>")
 
     def handle_data(self, data: str) -> None:
@@ -122,10 +139,13 @@ class _Sanitizer(HTMLParser):
 def sanitize_html(value: str) -> str:
     """Strip everything except the small tag/attribute allowlist above.
     Malformed markup is handled the same as HTMLParser handles it
-    generally (best-effort, never raises) - there's no untrusted-input
-    path here that needs to reject input outright rather than clean it."""
+    generally (best-effort). The one exception: input past MAX_TAGS tags or
+    MAX_DEPTH levels of nesting raises ValueError (surfaced as a 400 by the
+    model validator) rather than being quietly cleaned - see those constants."""
     if not value:
         return ""
+    if value.count("<") > MAX_TAGS:
+        raise ValueError(f"has more than {MAX_TAGS:,} tags")
     parser = _Sanitizer()
     parser.feed(value)
     parser.close()
