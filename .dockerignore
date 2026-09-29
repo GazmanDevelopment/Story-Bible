@@ -12,3 +12,6 @@ venv
 data/
 tests/
 screenshots/
+
+# Local notes with Entra tenant/client ids (#74) - both spellings, see .gitignore.
+EntraI[Dd]s.txt

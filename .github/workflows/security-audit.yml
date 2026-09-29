@@ -1,0 +1,75 @@
+name: Security audit
+
+# Dependency vulnerability scans (#74). Deliberately a separate workflow from
+# CI: a newly published advisory against a package that is already merged
+# would otherwise turn every unrelated PR red. Instead it runs
+#  - weekly, so a new advisory surfaces within days without anyone touching the code
+#  - on any PR / push that changes the dependency files or the vendored JavaScript
+#  - on demand (Actions tab -> Security audit -> Run workflow)
+on:
+  schedule:
+    - cron: "17 3 * * 1"   # Mondays 03:17 UTC
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - requirements.txt
+      - requirements-dev.txt
+      - app/static/vendor/**
+      - scripts/check_vendored_js.py
+      - .github/workflows/security-audit.yml
+  push:
+    branches: [main]
+    paths:
+      - requirements.txt
+      - requirements-dev.txt
+      - app/static/vendor/**
+      - scripts/check_vendored_js.py
+      - .github/workflows/security-audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  python-dependencies:
+    name: pip-audit (Python dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"  # matches the image the app actually runs in
+
+      - name: Install pip-audit
+        run: python -m pip install pip-audit==2.10.1
+
+      # Resolves the full dependency tree (not just the pinned top-level
+      # packages) and checks it against the PyPI advisory database. Fails the
+      # job if anything has a known vulnerability.
+      - name: Audit runtime dependencies
+        run: pip-audit -r requirements.txt
+
+      - name: Audit dev/test dependencies
+        run: pip-audit -r requirements-dev.txt
+
+  vendored-javascript:
+    name: Vendored JavaScript (Quill, MSAL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+
+      # pip-audit can't see app/static/vendor/*: those are copied files, not
+      # packages. This reads the version each NOTICE.md records, checks the
+      # file really is that version, then asks `npm audit` about it. Known,
+      # reviewed advisories are listed with their reasons in the script.
+      - name: Check versions and audit against the npm advisory database
+        run: python scripts/check_vendored_js.py --audit

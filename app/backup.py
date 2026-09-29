@@ -50,6 +50,46 @@ from pathlib import Path
 from typing import Any
 
 
+def _private(path: Path, mode: int) -> None:
+    """Backups hold every series in plaintext (#74), so keep them owner-only:
+    0700 for folders, 0600 for files, whatever the container's umask was.
+    Best effort - a filesystem that ignores chmod (or Windows) just keeps its
+    defaults rather than failing the backup over it - but it is logged, since
+    the docs promise owner-only.
+
+    This is the second line of defence. The first is that every folder is
+    *created* 0700 (_private_dir), so nothing inside can be read by others in
+    the moment between a file being written and this chmod."""
+    try:
+        os.chmod(path, mode)
+    except OSError as e:
+        from . import main as app_main  # lazy: see the module docstring
+        app_main.logger.warning("backup: couldn't restrict %s to %o: %s", path, mode, e)
+
+
+def _private_dir(path: Path) -> None:
+    """Create `path` (and any missing parents) as owner-only from the start.
+    Path.mkdir(parents=True, mode=...) applies the mode to the last folder
+    only, so each level is made explicitly."""
+    for d in reversed([path, *path.parents]):
+        if d.exists():
+            continue
+        if d.parent.exists():
+            d.mkdir(mode=0o700)
+    _private(path, 0o700)
+
+
+def _file_safe(name: str, max_bytes: int = 100) -> str:
+    """A series name made safe for a file name and short enough for any
+    filesystem: capped by encoded BYTES, not characters, because \\w matches
+    letters in every script and one CJK character is 3 bytes (some symbols 4),
+    while file names are limited to ~255 bytes."""
+    cleaned = re.sub(r"[^\w-]+", "_", name).strip("_")
+    while len(cleaned.encode("utf-8")) > max_bytes:
+        cleaned = cleaned[:-1]
+    return cleaned.strip("_") or "series"
+
+
 def backup_dir() -> Path:
     env = os.environ.get("BACKUP_DIR", "").strip()
     if env:
@@ -81,7 +121,7 @@ def last_backup_age_seconds() -> float | None:
 
 def _backup_database(bdir: Path) -> Path:
     from . import main as app_main
-    bdir.mkdir(parents=True, exist_ok=True)
+    _private_dir(bdir)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     dest = bdir / f"storybible-{stamp}.db"
     # VACUUM INTO refuses to overwrite an existing file, and the timestamp
@@ -101,6 +141,7 @@ def _backup_database(bdir: Path) -> Path:
         con.execute("VACUUM INTO ?", (str(dest),))
     finally:
         con.close()
+    _private(dest, 0o600)
     return dest
 
 
@@ -113,7 +154,8 @@ def _export_json(json_root: Path) -> Path:
     from . import auth
     from . import main as app_main
     day_dir = json_root / datetime.now().strftime("%Y%m%d")
-    day_dir.mkdir(parents=True, exist_ok=True)
+    _private_dir(day_dir)   # creates json_root/ and the day folder owner-only
+    _private(json_root, 0o700)   # and fixes one an older version left group/world-readable
     # A direct in-process call, not a real request - list_series/bundle's
     # `user` param needs a real CurrentUser. SYSTEM_USER (is_pipeline=True)
     # sees every series regardless of AUTH_MODE/ownership, which a backup
@@ -128,8 +170,14 @@ def _export_json(json_root: Path) -> Path:
             # succeeded) to one series' bad timing.
             app_main.logger.info("backup: series %s vanished mid-export, skipping", s["id"])
             continue
-        safe_name = re.sub(r"[^\w-]+", "_", data["series"].get("name") or "series").strip("_") or "series"
-        (day_dir / f"{safe_name}-{s['id']}.json").write_text(json.dumps(data, indent=2))
+        # A series name can be up to 1,000 characters (#71) and file names are limited
+        # to ~255 bytes, so an uncapped name here would make the export - and with it
+        # the whole nightly backup - fail with "File name too long". The series id
+        # after it keeps names unique.
+        safe_name = _file_safe(data["series"].get("name") or "series")
+        out = day_dir / f"{safe_name}-{s['id']}.json"
+        out.write_text(json.dumps(data, indent=2))
+        _private(out, 0o600)
     return day_dir
 
 
@@ -177,6 +225,7 @@ def run_backup() -> dict[str, Any]:
             app_main.logger.exception("backup retention (%s) failed", label)
 
     _marker_path().write_text(str(time.time()))
+    _private(_marker_path(), 0o600)
     return {"db_backup": db_backup, "json_dir": json_dir}
 
 

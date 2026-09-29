@@ -43,13 +43,31 @@ public API route, #68.) See [MONITORING.md](MONITORING.md) for actually wiring a
 to this (and to `/api/health`) so a silently-broken backup job doesn't go
 unnoticed for months.
 
-## TrueNAS: snapshot the dataset too
+## What these backups do and do not protect against
 
-Backups above live *inside* the same dataset as the live database, which
-protects against corruption or a bad edit but not against the drive/pool
-itself failing. Add a periodic ZFS snapshot task on the app's dataset (e.g.
-`tank/apps/storybible`, hourly or daily, however much history you want) so
-there's a copy outside the container/dataset's own filesystem entirely.
+The backups above are written **into the same dataset as the live database**
+(`/data/backups`), so they protect against corruption, a bad edit, or an
+accidental delete inside the app - but **not against the pool or the NAS
+itself being lost** (drive failure, theft, fire, ransomware on the box).
+
+They are also **plaintext**: a backup is every series, readable by anyone who
+can read the files. The app creates the folders `0700` and the files `0600`
+(owner-only), but that is only a guard against other accounts on the same
+machine - it is not encryption, and it says nothing about whoever administers
+the NAS (`SECURITY.md` records that as accepted).
+
+## TrueNAS: snapshot the dataset too, and copy it off the box
+
+A periodic ZFS snapshot task on the app's dataset (e.g. `tank/apps/storybible`,
+hourly or daily, however much history you want) gives you point-in-time
+history that survives a bad deletion of the backup files themselves. **It does
+not survive losing the pool**, because a snapshot lives in the same pool.
+
+For that, send a copy **somewhere else**: a ZFS replication task to a second
+machine or pool, or a Cloud Sync / rsync task to storage you trust with the
+contents (encrypt it if it leaves your network). Test a restore from the
+off-box copy once ([RESTORE.md](RESTORE.md)) - an untested backup is a hope, not
+a backup.
 
 ## Restoring
 

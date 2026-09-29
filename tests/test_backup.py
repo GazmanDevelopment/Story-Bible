@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 import json
 import os
 import sqlite3
@@ -218,3 +219,38 @@ def test_old_health_backup_route_is_gone():
     """Folded into /api/health (#68) - a monitor still pointed at the old URL
     should fail loudly (404), not quietly keep getting some other answer."""
     assert c.get("/api/health/backup").status_code == 404
+
+
+def test_a_very_long_series_name_does_not_break_the_backup(tmp_path, monkeypatch):
+    """Series names can be 1,000 characters (#71); used raw in a file name that
+    overflows the ~255-byte limit and would fail the whole nightly backup."""
+    monkeypatch.setenv("BACKUP_DIR", str(tmp_path))
+    r = c.post("/api/series", json={"data": {"name": "L" * 1000}})
+    assert r.status_code == 200
+    result = backup.run_backup()
+    names = [f.name for f in result["json_dir"].glob("*.json")]
+    assert any(n.startswith("L" * 60) and r.json()["id"] in n for n in names)
+    assert all(len(n.encode()) <= 255 for n in names)
+
+
+@pytest.mark.parametrize("name", ["\u674e\u5c0f\u9f8d" * 100, "\U0001d400" * 300, "N" * 1000, "\u00e9" * 500])
+def test_export_file_names_stay_under_the_byte_limit_for_any_script(name):
+    """\\w matches letters in every script and a CJK letter is 3 bytes, a
+    mathematical letter 4: capping characters is not enough, a file name is
+    limited to ~255 BYTES."""
+    safe = backup._file_safe(name)
+    assert 0 < len(safe.encode("utf-8")) <= 100
+    assert len(f"{safe}-0123456789ab.json".encode("utf-8")) <= 255
+
+
+def test_file_safe_keeps_ordinary_names_readable():
+    assert backup._file_safe("The Lake House!") == "The_Lake_House"
+    assert backup._file_safe("") == "series" and backup._file_safe("///") == "series"
+
+
+def test_a_series_named_in_a_multibyte_script_backs_up(tmp_path, monkeypatch):
+    monkeypatch.setenv("BACKUP_DIR", str(tmp_path))
+    sid = c.post("/api/series", json={"data": {"name": "\U0001d400" * 300}}).json()["id"]
+    result = backup.run_backup()
+    names = [f.name for f in result["json_dir"].glob("*.json") if sid in f.name]
+    assert names and all(len(n.encode("utf-8")) <= 255 for n in names)

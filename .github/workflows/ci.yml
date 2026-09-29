@@ -8,6 +8,10 @@ on:
 
 # Neither job pushes anything or calls the GitHub API - checkout and a local
 # docker build only need to read the repo.
+#
+# Every third-party action below is pinned to a full commit SHA (the tag is in
+# the trailing comment): a tag can be moved to point at different code, a SHA
+# cannot. Dependabot (.github/dependabot.yml) proposes the bumps.
 permissions:
   contents: read
 
@@ -16,9 +20,9 @@ jobs:
     name: Run tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"  # matches the python:3.12-slim target in the Dockerfile (#1)
 
@@ -28,7 +32,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Cache Playwright's browser
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements-dev.txt') }}
@@ -41,7 +45,7 @@ jobs:
       - name: Compile check (catches syntax errors)
         run: python -m compileall -q app tests scripts run_demo.py make_samples.py
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
 
@@ -53,8 +57,8 @@ jobs:
           # match what the template+script would produce right now - i.e.
           # someone hand-edited the output instead of the template.
           git diff --exit-code manifest.dev.xml manifest.prod.xml docs/manifest.xml
-          npx --yes office-addin-manifest validate manifest.dev.xml
-          npx --yes office-addin-manifest validate manifest.prod.xml
+          npx --yes office-addin-manifest@3.0.1 validate manifest.dev.xml
+          npx --yes office-addin-manifest@3.0.1 validate manifest.prod.xml
 
       - name: Third-party notices are up to date (#66)
         run: |
@@ -71,7 +75,7 @@ jobs:
     name: Docker build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Simulate a restrictive build-host umask (regression guard, #40)
         # A real TrueNAS deploy failed at container startup with
@@ -99,7 +103,13 @@ jobs:
 
       - name: Container starts and reports healthy
         run: |
-          docker run -d --name sb -p 8000:8000 -v sb-data:/data story-bible:ci
+          # Same hardening as deploy/compose.yaml.example (#74): if the app ever
+          # needed to write outside /data or /tmp, or to be root, this is
+          # where it would fail instead of on the NAS.
+          docker run -d --name sb -p 8000:8000 -v sb-data:/data \
+            --user 568:568 --read-only --tmpfs /tmp:size=128m \
+            --cap-drop ALL --security-opt no-new-privileges:true --pids-limit 256 \
+            story-bible:ci
           # The Dockerfile's HEALTHCHECK only runs its first probe after
           # --interval (30s), so poll well past that (90s) rather than a
           # tight loop that can false-fail before Docker has checked at all.

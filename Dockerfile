@@ -1,6 +1,9 @@
 # Story Bible - FastAPI + SQLite backend and task-pane static files.
 # See PLAN.md for the wider architecture, and issue #1 for what this covers.
-FROM python:3.12-slim
+# Pinned by digest (#74): a tag like 3.12-slim is a moving target, so two builds
+# of the same commit could differ. Dependabot's docker ecosystem proposes new
+# digests. To bump by hand: docker buildx imagetools inspect python:3.12-slim
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
 # TrueNAS SCALE's "apps" user/group is 568:568. Running as it means a
 # dataset created with that ownership (issue #6) just works as /data with
@@ -11,7 +14,7 @@ RUN groupadd -g 568 storybible && \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN python -m pip install --no-cache-dir --upgrade pip && \
+RUN python -m pip install --no-cache-dir pip==26.2.1 && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
@@ -23,6 +26,12 @@ COPY app/ ./app/
 # ends up unreadable regardless of who owns it. Force a known-good mode
 # so this can't happen again, whatever the build host's umask is.
 RUN chmod -R a+rX /app
+
+# The container runs with a read-only root filesystem (deploy/compose.yaml.example,
+# #74), so Python can't write __pycache__ at runtime; compile the bytecode now
+# instead so startup isn't slower for it. (Root-owned and world-readable, like
+# the rest of /app.)
+RUN python -m compileall -q /app/app && chmod -R a+rX /app
 
 # Where the SQLite file (and later, backups - #5) live; see STORYBIBLE_DB in
 # app/main.py. Chowned here so a plain `docker run -v vol:/data` (no explicit
