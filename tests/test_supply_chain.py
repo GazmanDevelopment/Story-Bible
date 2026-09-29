@@ -87,9 +87,36 @@ def test_the_audit_is_kept_out_of_the_main_ci_so_a_new_advisory_cannot_block_unr
 # ---------------------------------------------------------------- Dockerfile
 def test_base_image_is_pinned_by_digest_and_pip_by_version():
     dockerfile = _text("Dockerfile")
-    assert re.search(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}$", dockerfile, re.MULTILINE)
+    # Any Python version - which one is checked separately, below - but always by digest.
+    assert re.search(r"^FROM python:\d+\.\d+-slim@sha256:[0-9a-f]{64}$", dockerfile, re.MULTILINE)
     assert re.search(r"pip install --no-cache-dir pip==\d+\.\d+(\.\d+)?", dockerfile)
     assert "--upgrade pip" not in dockerfile
+
+
+def test_the_image_runs_the_same_python_that_ci_tests_with():
+    """The invariant behind the old hard-coded '3.12': what ships must be what was tested.
+    A Python bump has to move the Dockerfile and every workflow's setup-python together
+    (deliberately, with the dependencies checked against it) - Dependabot bumping only
+    the image would leave CI testing a Python the app no longer runs on."""
+    image = re.search(r"^FROM python:(\d+\.\d+)-slim@", _text("Dockerfile"), re.MULTILINE).group(1)
+    versions = {}
+    for wf in WORKFLOWS:
+        for v in re.findall(r'python-version:\s*"?(\d+\.\d+)"?', wf.read_text(encoding="utf-8")):
+            versions.setdefault(v, []).append(wf.name)
+    assert versions, "no setup-python versions found in the workflows"
+    assert set(versions) == {image}, (
+        f"Dockerfile is on Python {image} but the workflows test with {sorted(versions)}: "
+        "change them together")
+
+
+def test_dependabot_is_told_to_stay_on_the_current_python_line():
+    """Left alone it proposed 3.12 -> 3.14, which CI (on 3.12) cannot vouch for. Digest
+    refreshes within 3.12-slim (security patches) still come through; a new Python line
+    is a deliberate upgrade."""
+    cfg = _text(".github/dependabot.yml")
+    docker = cfg.split("package-ecosystem: docker")[1].split("- package-ecosystem:")[0]
+    assert "dependency-name: python" in docker
+    assert "version-update:semver-minor" in docker and "version-update:semver-major" in docker
 
 
 def test_bytecode_is_precompiled_because_the_root_filesystem_is_read_only():
