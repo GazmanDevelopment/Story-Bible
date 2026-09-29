@@ -91,3 +91,22 @@ Point an uptime checker at `/api/health` and `/api/health/backup` (#17),
 and confirm TrueNAS alerting is actually wired to a notification service
 so a failed snapshot task above doesn't go unnoticed either - see
 `docs/MONITORING.md` for the exact setup.
+
+## Upgrading: stricter Entra settings (#70)
+
+Two settings changed for `AUTH_MODE=entra`. **Set both before deploying this
+version**, or the container refuses to start (a crash loop with a clear
+`RuntimeError` in the logs):
+
+- `ALLOWED_OIDS` is now **required**: a comma-separated list of the Entra
+  object ids allowed in (yours, and anyone you share with). It used to be
+  optional, and leaving it blank silently let in every tenant user Entra
+  itself admitted. `ALLOWED_OIDS=*` deliberately restores "allow everyone
+  Entra lets in" (not recommended). The review pipeline's app-role token
+  isn't subject to this list.
+- `LEGACY_OWNER_OID` (optional): the object id of whoever should own any
+  series created before sign-in existed. Previously the first person to
+  sign in got them all, which meant any unintended tenant user could take
+  them. If any such series still exist and this is unset, the server logs a
+  warning at startup and nobody signed in can see them. If you signed in
+  after #11 shipped they were already claimed and you need do nothing.

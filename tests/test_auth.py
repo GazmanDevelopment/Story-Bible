@@ -261,3 +261,174 @@ def test_token_mode_without_a_token_raises():
         if old_token is not None:
             os.environ["STORYBIBLE_TOKEN"] = old_token
         importlib.reload(auth)
+
+
+# ------------------------------------------------- startup checks (#70)
+def _reload_with_env(monkeypatch, **env):
+    """Reload app.auth under the given environment, restoring the real
+    module state afterwards (a reload re-reads every env var at import)."""
+    import importlib
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    return importlib.reload(auth)
+
+
+_AUTH_ENV_KEYS = ("AUTH_MODE", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS", "STORYBIBLE_TOKEN", "LEGACY_OWNER_OID")
+
+
+@pytest.fixture
+def restore_auth_module():
+    """Put both the environment and the module back exactly as they were
+    before the test. Restores os.environ itself rather than relying on
+    monkeypatch's own undo: the autouse fixtures above pull monkeypatch in
+    first, so its undo would otherwise run *after* this teardown's reload -
+    reloading with the test's leftover env vars still set."""
+    import importlib
+    import os
+    saved = {k: os.environ.get(k) for k in _AUTH_ENV_KEYS}
+    yield
+    for k, v in saved.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    importlib.reload(auth)
+
+
+_ENTRA_ENV = {"AUTH_MODE": "entra", "ENTRA_TENANT_ID": TENANT, "ENTRA_CLIENT_ID": CLIENT_ID}
+
+
+def test_entra_mode_without_allowed_oids_refuses_to_start(restore_auth_module, monkeypatch):
+    """A blank ALLOWED_OIDS used to mean "no extra check" - forgetting to set
+    it silently admitted every tenant user Entra let through."""
+    monkeypatch.delenv("ALLOWED_OIDS", raising=False)
+    with pytest.raises(RuntimeError, match="ALLOWED_OIDS"):
+        _reload_with_env(monkeypatch, **_ENTRA_ENV)
+
+
+def test_entra_mode_with_blank_allowed_oids_refuses_to_start(restore_auth_module, monkeypatch):
+    with pytest.raises(RuntimeError, match="ALLOWED_OIDS"):
+        _reload_with_env(monkeypatch, ALLOWED_OIDS="  ,  ", **_ENTRA_ENV)
+
+
+def test_entra_mode_with_star_is_the_explicit_allow_everyone_opt_out(restore_auth_module, monkeypatch):
+    mod = _reload_with_env(monkeypatch, ALLOWED_OIDS="*", **_ENTRA_ENV)
+    assert mod.ALLOWED_OIDS == set()  # empty = resolve_entra_user adds no extra check
+
+
+def test_entra_mode_with_a_list_loads(restore_auth_module, monkeypatch):
+    mod = _reload_with_env(monkeypatch, ALLOWED_OIDS="a, b ,c", **_ENTRA_ENV)
+    assert mod.ALLOWED_OIDS == {"a", "b", "c"}
+
+
+def _capture_storybible_log():
+    import logging
+    records = []
+
+    class Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    return records, Grab()
+
+
+def _run_init_db_capturing_log(monkeypatch, **attrs):
+    """main.init_db() logs the startup warnings; the logger doesn't propagate
+    so caplog can't see it - attach our own handler."""
+    import logging
+
+    from app import main
+    records, h = _capture_storybible_log()
+    logging.getLogger("storybible").addHandler(h)
+    try:
+        for k, v in attrs.items():
+            monkeypatch.setattr(auth, k, v)
+        main.init_db()
+    finally:
+        logging.getLogger("storybible").removeHandler(h)
+    return [r.getMessage() for r in records if r.levelno >= logging.WARNING]
+
+
+def test_none_mode_logs_a_loud_warning_at_startup(monkeypatch):
+    msgs = _run_init_db_capturing_log(monkeypatch, AUTH_MODE="none")
+    assert any("NO authentication" in m for m in msgs)
+
+
+def test_token_mode_does_not_log_the_no_auth_warning(monkeypatch):
+    msgs = _run_init_db_capturing_log(monkeypatch, AUTH_MODE="token", TOKEN="s")
+    assert not any("NO authentication" in m for m in msgs)
+
+
+def test_legacy_owner_not_on_allowlist_warns_at_startup(monkeypatch):
+    msgs = _run_init_db_capturing_log(monkeypatch, AUTH_MODE="entra", ALLOWED_OIDS={"a"}, LEGACY_OWNER_OID="b")
+    assert any("LEGACY_OWNER_OID is not in ALLOWED_OIDS" in m for m in msgs)
+
+
+def test_ownerless_series_without_legacy_owner_warns_at_startup(monkeypatch):
+    from app import main
+    with main.db() as con:
+        con.execute("INSERT INTO series (id, data, updated, owner_oid) VALUES ('warn1', '{}', 0, '')")
+    try:
+        msgs = _run_init_db_capturing_log(monkeypatch, AUTH_MODE="entra", ALLOWED_OIDS={"a"}, LEGACY_OWNER_OID="")
+    finally:
+        with main.db() as con:
+            con.execute("DELETE FROM series WHERE id='warn1'")
+    assert any("LEGACY_OWNER_OID" in m and "no owner" in m for m in msgs)
+
+
+def test_star_inside_an_allowed_oids_list_refuses_to_start(restore_auth_module, monkeypatch):
+    with pytest.raises(RuntimeError, match=r"\*"):
+        _reload_with_env(monkeypatch, ALLOWED_OIDS="*,", **_ENTRA_ENV)
+
+
+@pytest.mark.parametrize("bad", ["oid1,oid2", "*", "two words"])
+def test_multi_value_legacy_owner_oid_refuses_to_start(restore_auth_module, monkeypatch, bad):
+    with pytest.raises(RuntimeError, match="LEGACY_OWNER_OID"):
+        _reload_with_env(monkeypatch, LEGACY_OWNER_OID=bad, ALLOWED_OIDS="a", **_ENTRA_ENV)
+
+
+def test_person_token_without_oid_rejected():
+    with pytest.raises(auth.AuthError) as exc:
+        auth.resolve_entra_user(_token(oid=""))
+    assert exc.value.status_code == 401
+
+
+def test_pipeline_token_without_oid_rejected_too():
+    # An empty oid would compare equal to the ownerless marker (owner_oid ==
+    # '') in main.py, so it's refused for every kind of token, not just people.
+    with pytest.raises(auth.AuthError) as exc:
+        auth.resolve_entra_user(_token(scp=None, roles=["Pipeline.Read"], oid=""))
+    assert exc.value.status_code == 401
+
+
+def test_jwks_client_uses_a_short_timeout_and_long_key_cache(monkeypatch):
+    seen = {}
+
+    class Recorder:
+        def __init__(self, url, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(auth, "_jwks_client", None)
+    monkeypatch.setattr(auth, "PyJWKClient", Recorder)
+    auth._get_jwks_client()
+    assert seen["timeout"] == 5  # PyJWKClient's default is 30 s, and it holds a lock while fetching
+    assert seen["lifespan"] == 3600
+    monkeypatch.setattr(auth, "_jwks_client", None)  # don't leak the Recorder to later tests
+
+
+# ------------------------------------- shared-token comparison (#70)
+def test_token_mode_compares_in_constant_time(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main
+    calls = []
+    real = main.hmac.compare_digest
+    monkeypatch.setattr(main.hmac, "compare_digest", lambda a, b: calls.append(1) or real(a, b))
+    monkeypatch.setattr(auth, "AUTH_MODE", "token")
+    monkeypatch.setattr(auth, "TOKEN", "s3cret")
+    tc = TestClient(main.app)
+    assert tc.get("/api/series").status_code == 401                              # missing
+    assert tc.get("/api/series", headers={"X-Token": "wrong"}).status_code == 401
+    assert tc.get("/api/series", headers={"X-Token": "s3cret"}).status_code == 200
+    assert tc.get("/api/series", headers={"X-Token": "sécret".encode("latin-1")}).status_code == 401  # non-ASCII must not 500
+    assert len(calls) == 4
