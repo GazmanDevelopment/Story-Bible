@@ -304,3 +304,33 @@ def test_a_304_is_not_given_a_gzip_body():
     etag = _etag(h, sid)
     r = c.get(f"/api/series/{sid}/bundle", headers={**h, "If-None-Match": etag, "Accept-Encoding": "gzip"})
     assert r.status_code == 304 and r.num_bytes_downloaded == 0
+
+
+# ------------------------------------------------ access indexes (P2)
+def _index_names(con):
+    return {r[1] for r in con.execute("SELECT type, name FROM sqlite_master WHERE type='index'")}
+
+
+def test_the_access_query_is_answered_from_indexes():
+    with main.db() as con:
+        plan = " ".join(str(tuple(r)) for r in con.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM series WHERE owner_oid=? OR id IN "
+            "(SELECT series_id FROM members WHERE oid=?)", ("a", "b")))
+    assert "ix_series_owner" in plan and "ix_members_oid" in plan, plan
+
+
+def test_the_indexes_migration_upgrades_an_existing_database(tmp_path, monkeypatch):
+    import sqlite3
+
+    from app import migrations
+    con = sqlite3.connect(tmp_path / "old.db")
+    con.isolation_level = None
+    monkeypatch.setattr(migrations, "SCHEMA_VERSION", 4)   # a database as it was before #72
+    migrations.migrate(con)
+    assert "ix_series_owner" not in _index_names(con)
+    monkeypatch.setattr(migrations, "SCHEMA_VERSION", len(migrations.MIGRATIONS))
+    migrations.migrate(con)
+    assert {"ix_series_owner", "ix_members_oid"} <= _index_names(con)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == len(migrations.MIGRATIONS)
+    migrations.migrate(con)  # and re-running is a no-op
+    con.close()
