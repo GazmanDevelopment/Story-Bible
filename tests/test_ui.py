@@ -76,7 +76,7 @@ def server(tmp_path):
     """A real run_demo.py instance (seeded from samples/*.json) on a free
     port, backed by its own temporary database - independent of whatever
     DB the rest of this pytest session has open. Log output goes to a real
-    file rather than a PIPE: the app logs every request (hardening_middleware),
+    file rather than a PIPE: the app logs every request (HardeningMiddleware),
     and a subprocess writing to a PIPE nobody drains can deadlock once the
     OS pipe buffer fills."""
     # mkstemp(), not mktemp(): TOCTOU race between naming the file and

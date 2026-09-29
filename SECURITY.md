@@ -48,6 +48,21 @@ The Swagger UI / ReDoc / `openapi.json` pages are **off by default**; setting
 `ENABLE_API_DOCS=true` serves them without authentication, so only do that
 on a machine you control.
 
+## Response headers and request limits
+
+Every response carries `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`, a restrictive `Permissions-Policy`, and a
+`Content-Security-Policy` (no inline scripts, no `eval`, scripts only from the
+app itself and Microsoft's Office.js host; `CONTENT_SECURITY_POLICY` overrides
+it). Request bodies are capped while they stream (`MAX_BODY_BYTES`, and
+`IMPORT_MAX_BODY_BYTES` for `/api/import`), so an oversized or chunked upload
+is cut off at the cap rather than buffered.
+
+Two things are deliberately **not** done in the app: `frame-ancestors` /
+`X-Frame-Options` (Word Online and other Office hosts embed the pane from a
+range of Microsoft origins, and a wrong list would blank it), and
+`Strict-Transport-Security` (belongs on the TLS-terminating reverse proxy).
+
 ## What's already a known, accepted trade-off
 
 A few things are deliberate design decisions written up in `PLAN.md`'s risk

@@ -61,9 +61,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import MutableHeaders
 
 from . import __version__
 from . import auth
@@ -85,7 +89,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 KINDS = ("chapters", "characters", "locations", "events", "relationships", "research")
 
 # Logging: plain lines to stdout (never the request body or the token - see
-# the hardening_middleware below, which only ever logs method/path/status/
+# HardeningMiddleware below, which only ever logs method/path/status/
 # time). Explicit StreamHandler because logging.basicConfig() defaults to
 # stderr, and we want this to show up in `docker logs`/TrueNAS app logs as
 # stdout like everything else.
@@ -387,49 +391,136 @@ app = FastAPI(
 init_db()
 
 
-@app.middleware("http")
-async def hardening_middleware(request: Request, call_next):
-    """Three concerns in one pass, kept together so the ordering between
-    them can't drift apart:
-    - reject oversized request bodies with 413, before the route runs
-    - log every request to stdout: method, path, status, time taken -
-      never the body or the X-Token header
-    - Cache-Control: /api/* gets no-store; everything else (the task pane's
-      index.html and static assets) gets no-cache, so Word/a browser always
-      revalidates instead of running a stale app.js after a deploy (#4).
-      StaticFiles already sets ETag/Last-Modified and honours conditional
-      GETs, so in practice that revalidation is a cheap 304 most of the time.
+# Security headers on every response (#69). The CSP only restricts what the
+# pane may *load*; it has no frame-ancestors on purpose - Word Online and the
+# other Office hosts embed the pane from a range of Microsoft origins, and a
+# wrong list there would blank the pane in a way that can't be tested here.
+# Override with CONTENT_SECURITY_POLICY (or "off") if a host needs more, without
+# a rebuild.
+DEFAULT_CSP = "; ".join([
+    "default-src 'self'",
+    "script-src 'self' https://appsforoffice.microsoft.com",
+    # Inline styles: the pane builds markup with style="..." attributes and
+    # Quill positions its tooltips with inline styles.
+    "style-src 'self' 'unsafe-inline'",
+    # Research entries may embed external images (the sanitizer allows http/https).
+    "img-src 'self' data: blob: https: http:",
+    "font-src 'self' data:",
+    "connect-src 'self' https://login.microsoftonline.com https://appsforoffice.microsoft.com",
+    "frame-src https://login.microsoftonline.com",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+])
+CONTENT_SECURITY_POLICY = os.environ.get("CONTENT_SECURITY_POLICY", DEFAULT_CSP).strip()
 
-    An unhandled exception (not an HTTPException - one of those is already
-    a normal Response by the time it gets here) still propagates out of
-    `call_next` past this point: Starlette installs Exception/500 handlers
-    on ServerErrorMiddleware, which wraps *outside* this middleware, not
-    inside it - precisely so a broken user middleware can't hide a crash.
-    unhandled_exception_handler() below is the one actually producing that
-    response, so it does its own logging and sets its own Cache-Control
-    rather than relying on the tail of this function, which it never
-    reaches for that path.
+
+def response_headers(path: str) -> list[tuple[str, str]]:
+    """Cache-Control + security headers for a response to `path`.
+    Cache-Control: /api/* gets no-store; everything else (the task pane's
+    index.html and static assets) gets no-cache, so Word/a browser always
+    revalidates instead of running a stale app.js after a deploy (#4).
+    StaticFiles already sets ETag/Last-Modified and honours conditional
+    GETs, so in practice that revalidation is a cheap 304 most of the time."""
+    headers = [
+        ("Cache-Control", "no-store" if path.startswith("/api/") else "no-cache"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
+    ]
+    if CONTENT_SECURITY_POLICY and CONTENT_SECURITY_POLICY.lower() != "off":
+        headers.append(("Content-Security-Policy", CONTENT_SECURITY_POLICY))
+    return headers
+
+
+class BodyTooLarge(Exception):
+    """Raised from the wrapped `receive` the moment the request body passes
+    its cap, so the rest of it is never read."""
+
+
+class HardeningMiddleware:
+    """Pure ASGI (not BaseHTTPMiddleware) so it can cap the body *while it
+    streams* (#69). Three concerns in one place so the ordering between them
+    can't drift apart:
+    - reject an oversized request body with 413: up front from Content-Length
+      when the client states one, and otherwise the moment the bytes actually
+      received pass the cap - so a chunked upload (no Content-Length) or a
+      lying one can't make the server buffer gigabytes first
+    - log every request to stdout: method, path, status, time taken - never
+      the body or the X-Token header
+    - Cache-Control + security headers on every response (response_headers)
+
+    An unhandled exception (not an HTTPException - one of those is already a
+    normal Response by the time it gets here) propagates out of this
+    middleware untouched: Starlette installs the Exception/500 handler on
+    ServerErrorMiddleware, which wraps *outside* this one. unhandled_
+    exception_handler() below produces that response, so it does its own
+    logging and header-setting rather than relying on this class, which it
+    never reaches for that path.
     """
-    start = time.perf_counter()
-    safe_path = _sanitize_for_log(request.url.path)
 
-    # Reads (and Starlette caches) the whole body ourselves, so the cap is
-    # enforced on what was actually sent rather than a Content-Length header
-    # a client could omit (chunked transfer) or simply lie about.
-    # /api/import gets its own, larger cap: it's a whole series bundle in
-    # one request rather than a single record, and research entries (#43)
-    # can each carry embedded images - a handful of those alone can put a
-    # perfectly normal export over the general per-record cap.
-    limit = IMPORT_MAX_BODY_BYTES if request.url.path == "/api/import" else MAX_BODY_BYTES
-    if len(await request.body()) > limit:
-        response = JSONResponse({"detail": "Request body too large"}, status_code=413)
-    else:
-        response = await call_next(request)
+    def __init__(self, app):
+        self.app = app
 
-    elapsed_ms = (time.perf_counter() - start) * 1000
-    logger.info("%s %s %s %.1fms", request.method, safe_path, response.status_code, elapsed_ms)
-    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
-    return response
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        start = time.perf_counter()
+        path = scope["path"]
+        # /api/import gets its own, larger cap: it's a whole series bundle in
+        # one request rather than a single record, and research entries (#43)
+        # can each carry embedded images.
+        limit = IMPORT_MAX_BODY_BYTES if path == "/api/import" else MAX_BODY_BYTES
+        status = None
+        exceeded = False
+
+        async def emit(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                headers = MutableHeaders(scope=message)
+                for name, value in response_headers(path):
+                    headers[name] = value
+            await send(message)
+
+        async def guarded_send(message):
+            # FastAPI turns any exception raised while it parses a body into
+            # its own generic 400 - once the cap has tripped, that (and
+            # anything else the app says) is discarded and replaced by the
+            # 413 sent below.
+            if not exceeded:
+                await emit(message)
+
+        received = 0
+
+        async def limited_receive():
+            nonlocal received, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    exceeded = True
+                    raise BodyTooLarge()
+            return message
+
+        too_large = JSONResponse({"detail": "Request body too large"}, status_code=413)
+        declared = next((v for k, v in scope["headers"] if k == b"content-length"), None)
+        if declared is not None and declared.isdigit() and int(declared) > limit:
+            exceeded = True
+        else:
+            try:
+                await self.app(scope, limited_receive, guarded_send)
+            except BodyTooLarge:
+                pass
+        if exceeded:
+            await too_large(scope, receive, emit)
+        if status is not None:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info("%s %s %s %.1fms", scope["method"], _sanitize_for_log(path), status, elapsed_ms)
+
+
+app.add_middleware(HardeningMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -437,11 +528,29 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     """Without this, an unhandled exception (e.g. a raw sqlite3 error) gets
     Starlette's bare default 500 response - unlogged, with no Cache-Control
     set at all. This runs in ServerErrorMiddleware, outside
-    hardening_middleware (see its docstring), so it has to do both itself."""
+    HardeningMiddleware (see its docstring), so it has to do both itself."""
     logger.exception("%s %s 500 (unhandled)", request.method, _sanitize_for_log(request.url.path))
     response = JSONResponse({"detail": "Internal server error"}, status_code=500)
-    response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
+    for name, value in response_headers(request.url.path):
+        response.headers[name] = value
     return response
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    """FastAPI parses the JSON body *before* it runs a route's dependencies,
+    so a malformed-JSON POST from someone with no credentials at all used to
+    get a 422 (and a free JSON parse) instead of a 401 (#69). Every other
+    validation error is raised after the auth dependency has already
+    succeeded, so only the JSON-syntax case needs the check repeated here."""
+    if request.url.path.startswith("/api/") and any(e.get("type") == "json_invalid" for e in exc.errors()):
+        try:
+            await run_in_threadpool(
+                get_current_user, request.headers.get("authorization"), request.headers.get("x-token")
+            )
+        except HTTPException as denied:
+            return JSONResponse({"detail": denied.detail}, status_code=denied.status_code)
+    return await request_validation_exception_handler(request, exc)
 
 
 class Body(BaseModel):
