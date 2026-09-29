@@ -63,8 +63,8 @@ def _v2_users_table(con: sqlite3.Connection) -> None:
 def _v3_ownership_and_sharing(con: sqlite3.Connection) -> None:
     """#11: each series has an owner, and can be shared with other known
     users as editor or viewer. owner_oid is '' for every series that
-    existed before this migration - app/main.py's get_current_user claims
-    those for whoever signs in first (also #11)."""
+    existed before this migration - app/main.py's get_current_user hands
+    those to LEGACY_OWNER_OID when they sign in (#11, #70)."""
     con.execute("ALTER TABLE series ADD COLUMN owner_oid TEXT NOT NULL DEFAULT ''")
     con.execute(
         """CREATE TABLE IF NOT EXISTS members (

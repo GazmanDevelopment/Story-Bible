@@ -38,7 +38,24 @@ TOKEN = os.environ.get("STORYBIBLE_TOKEN", "").strip()
 AUTH_MODE = os.environ.get("AUTH_MODE", "token" if TOKEN else "none").strip().lower()
 ENTRA_TENANT_ID = os.environ.get("ENTRA_TENANT_ID", "").strip()
 ENTRA_CLIENT_ID = os.environ.get("ENTRA_CLIENT_ID", "").strip()
-ALLOWED_OIDS = {x.strip() for x in os.environ.get("ALLOWED_OIDS", "").split(",") if x.strip()}
+_RAW_ALLOWED_OIDS = os.environ.get("ALLOWED_OIDS", "").strip()
+# "*" is the explicit "any Entra user Assignment-required lets in" opt-out
+# (#70): it leaves ALLOWED_OIDS empty, which resolve_entra_user treats as
+# "don't add a check". A merely *blank* value is a startup error in entra
+# mode (below) - otherwise forgetting to set it silently disables the
+# allowlist rather than failing closed.
+ALLOWED_OIDS = set() if _RAW_ALLOWED_OIDS == "*" else {x.strip() for x in _RAW_ALLOWED_OIDS.split(",") if x.strip()}
+if "*" in ALLOWED_OIDS:
+    # e.g. "*," or "abc,*": would otherwise be parsed as the literal oid "*",
+    # start fine, and then 403 every real user.
+    raise RuntimeError('ALLOWED_OIDS: "*" only works on its own (ALLOWED_OIDS=*), not inside a list')
+# The one person allowed to claim series that predate auth (owner_oid == '',
+# #11) - see main.py's get_current_user. Unset means nobody claims them.
+LEGACY_OWNER_OID = os.environ.get("LEGACY_OWNER_OID", "").strip()
+if any(ch in LEGACY_OWNER_OID for ch in ",* \t"):
+    # A copy-paste of ALLOWED_OIDS's syntax: no oid would ever equal it, so
+    # nothing would be claimed and the only symptom would be missing data.
+    raise RuntimeError("LEGACY_OWNER_OID must be a single Entra object id")
 
 if AUTH_MODE not in ("none", "token", "entra"):
     raise RuntimeError(f"AUTH_MODE must be 'none', 'token' or 'entra', got {AUTH_MODE!r}")
@@ -51,6 +68,11 @@ if AUTH_MODE == "token" and not TOKEN:
     # while /api/health and /api/config both report auth as "on".
     raise RuntimeError("AUTH_MODE=token requires STORYBIBLE_TOKEN to be set")
 
+if AUTH_MODE == "entra" and not ALLOWED_OIDS and _RAW_ALLOWED_OIDS != "*":
+    raise RuntimeError(
+        "AUTH_MODE=entra requires ALLOWED_OIDS (comma-separated Entra object ids), "
+        "or ALLOWED_OIDS=* to deliberately allow everyone Entra itself lets in"
+    )
 PIPELINE_ROLE = "Pipeline.Read"
 USER_SCOPE = "access_as_user"
 
@@ -96,7 +118,13 @@ def _get_jwks_client() -> PyJWKClient:
     PyJWKClient's own interface) rather than reaching the real endpoint."""
     global _jwks_client
     if _jwks_client is None:
-        _jwks_client = PyJWKClient(jwks_url(), cache_keys=True)
+        # timeout: PyJWKClient's default is 30 s, and it holds a lock while
+        # fetching - so an unreachable Entra would otherwise stall every
+        # request behind a 30 s wait. lifespan: keys are cached for an hour
+        # (default 5 min) so a brief outage doesn't bite right after expiry;
+        # an unknown kid (key rotation) still triggers a refresh, rate
+        # limited by PyJWKClient's own cooldown.
+        _jwks_client = PyJWKClient(jwks_url(), cache_keys=True, timeout=5, lifespan=3600)
     return _jwks_client
 
 
@@ -130,6 +158,13 @@ def resolve_entra_user(token: str) -> CurrentUser:
         logger.warning("entra auth failed: %s", e)
         raise AuthError(401, "Invalid or expired token") from e
 
+    if not claims.get("oid"):
+        # An empty oid would compare equal to the "ownerless" marker
+        # (owner_oid == '') used for pre-auth data (#70) - real Entra tokens,
+        # person or service principal, always carry one.
+        logger.warning("entra auth failed: token has no oid claim")
+        raise AuthError(401, "Invalid or expired token")
+
     scopes = (claims.get("scp") or "").split()
     roles = claims.get("roles") or []
     is_person = USER_SCOPE in scopes
@@ -139,7 +174,7 @@ def resolve_entra_user(token: str) -> CurrentUser:
         raise AuthError(403, "Token missing required scope or role")
 
     if is_pipeline:
-        return CurrentUser(oid=claims.get("oid", ""), email="", display_name="Review pipeline", is_pipeline=True)
+        return CurrentUser(oid=claims["oid"], email="", display_name="Review pipeline", is_pipeline=True)
 
     oid = claims.get("oid", "")
     if ALLOWED_OIDS and oid not in ALLOWED_OIDS:

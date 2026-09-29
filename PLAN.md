@@ -137,7 +137,7 @@ the domain hosting the app that redirects to it.
   - and either `scp` contains `access_as_user` (a person) or `roles` contains `Pipeline.Read` (the daemon, read-only)
 - `fastapi-azure-auth` does most of this if you'd rather not hand-roll the ~40 lines.
 - Identify people by **`oid`** (plus `tid`), never by email. Create a `users` row on first sign-in.
-- Defence in depth: an `ALLOWED_OIDS` env var. Anyone else gets a 403, even with a valid token.
+- Defence in depth: an `ALLOWED_OIDS` env var (required in entra mode; `*` opts out). Anyone else gets a 403, even with a valid token.
 - `AUTH_MODE` env: `none` (local demo), `token` (the current shared secret), `entra` (production).
 
 ### Ownership and sharing
@@ -179,7 +179,7 @@ the domain hosting the app that redirects to it.
 - App registration, guest invite if needed, and assignment (see §3) - done manually, #9.
 - Server: JWT validation, `users` table, `AUTH_MODE`, owner/member checks on every route, `version` + 409 on updates, `created_by`/`updated_by` - #10/#11/#12.
 - Pane: MSAL (NAA), header user badge - #13. Share panel in the Series tab and a conflict prompt on 409 are `#14`, not yet done (deliberately deferred).
-- Migration: the first user to sign in claims any existing (pre-auth) series as owner - #11.
+- Migration: any existing (pre-auth) series go to the Entra object id named in `LEGACY_OWNER_OID` when that person signs in - #11, #70. (It used to be whoever signed in first, which let an unintended tenant user take them.)
 - Tests: fake-token fixture (sign test JWTs with a local key and point the validator at it). Cover a non-member getting 403, a viewer being unable to write, and a stale version getting 409 - all in tests/test_auth.py, tests/test_entra_integration.py, tests/test_ownership.py, tests/test_concurrency.py.
 
 ### Phase 4: deeper Word integration (2–4 days)

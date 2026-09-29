@@ -242,37 +242,100 @@ def test_import_sets_caller_as_owner(series):
     assert r["series"]["owner_oid"] == EDITOR_OID
 
 
-# --------------------------------------------------- first-sign-in claiming
-def test_first_sign_in_claims_ownerless_series():
-    """#11's migration behaviour: a series created before auth existed
-    (owner_oid == '') is claimed by whoever signs in for the very first
-    time - simulated here by inserting one directly, bypassing the API."""
+# ------------------------------------------- claiming pre-auth series (#70)
+def _insert_legacy(sid):
     with main.db() as con:
-        con.execute(
-            "INSERT INTO series (id, data, updated, owner_oid) VALUES ('legacy1', '{}', 0, '')"
-        )
-    fresh_oid = "brand-new-oid-never-seen-before"
-    c.get("/api/me", headers=_as(fresh_oid))
-    with main.db() as con:
-        row = con.execute("SELECT owner_oid FROM series WHERE id='legacy1'").fetchone()
-    assert row["owner_oid"] == fresh_oid
+        con.execute("INSERT INTO series (id, data, updated, owner_oid) VALUES (?, '{}', 0, '')", (sid,))
 
 
-def test_second_sign_in_does_not_reclaim_other_ownerless_series():
+def _owner_of(sid):
     with main.db() as con:
-        con.execute(
-            "INSERT INTO series (id, data, updated, owner_oid) VALUES ('legacy2', '{}', 0, '')"
-        )
-    oid = "already-known-oid"
-    c.get("/api/me", headers=_as(oid))  # first sign-in: claims legacy2
-    with main.db() as con:
-        con.execute(
-            "INSERT INTO series (id, data, updated, owner_oid) VALUES ('legacy3', '{}', 0, '')"
-        )
-    c.get("/api/me", headers=_as(oid))  # second sign-in: should NOT claim legacy3
-    with main.db() as con:
-        row = con.execute("SELECT owner_oid FROM series WHERE id='legacy3'").fetchone()
-    assert row["owner_oid"] == ""
+        return con.execute("SELECT owner_oid FROM series WHERE id=?", (sid,)).fetchone()["owner_oid"]
+
+
+def test_first_sign_in_does_not_claim_ownerless_series(monkeypatch):
+    """#70 regression: this used to hand every pre-auth series to whichever
+    tenant user happened to sign in first."""
+    monkeypatch.setattr(auth, "LEGACY_OWNER_OID", "")
+    _insert_legacy("legacy1")
+    c.get("/api/me", headers=_as("brand-new-oid-never-seen-before"))
+    assert _owner_of("legacy1") == ""
+    assert c.get("/api/series", headers=_as("brand-new-oid-never-seen-before")).json() == []
+
+
+def test_only_the_configured_legacy_owner_claims_ownerless_series(monkeypatch):
+    monkeypatch.setattr(auth, "LEGACY_OWNER_OID", "the-real-owner")
+    _insert_legacy("legacy2")
+    c.get("/api/me", headers=_as("some-stranger"))  # signs in first - gets nothing
+    assert _owner_of("legacy2") == ""
+    c.get("/api/me", headers=_as("the-real-owner"))
+    assert _owner_of("legacy2") == "the-real-owner"
+
+
+def test_legacy_owner_also_claims_series_that_appear_after_their_first_sign_in(monkeypatch):
+    monkeypatch.setattr(auth, "LEGACY_OWNER_OID", "the-real-owner-2")
+    c.get("/api/me", headers=_as("the-real-owner-2"))
+    _insert_legacy("legacy3")
+    c.get("/api/me", headers=_as("the-real-owner-2"))
+    assert _owner_of("legacy3") == "the-real-owner-2"
+
+
+def test_person_token_without_an_oid_is_rejected():
+    token = _token("")
+    assert c.get("/api/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+# ----------------------------------------- pipeline can't create data (#70)
+def test_pipeline_cannot_create_a_series():
+    r = c.post("/api/series", json={"data": {"name": "by pipeline"}}, headers=_pipeline_headers())
+    assert r.status_code == 403
+
+
+def test_pipeline_cannot_import():
+    r = c.post("/api/import", json={"series": {"name": "x"}}, headers=_pipeline_headers())
+    assert r.status_code == 403
+
+
+def test_pipeline_cannot_file_feedback():
+    r = c.post("/api/feedback", json={"kind": "issue", "title": "abc", "description": "d"}, headers=_pipeline_headers())
+    assert r.status_code == 403
+
+
+def test_pipeline_cannot_list_users():
+    assert c.get("/api/users", headers=_pipeline_headers()).status_code == 403
+
+
+def test_pipeline_cannot_touch_membership():
+    sid = c.post("/api/series", json={"data": {"name": "members"}}, headers=_as(OWNER_OID)).json()["id"]
+    assert c.delete(f"/api/series/{sid}/members/{EDITOR_OID}", headers=_pipeline_headers()).status_code == 403
+    assert c.put(f"/api/series/{sid}/members/{EDITOR_OID}", json={"role": "viewer"}, headers=_pipeline_headers()).status_code == 403
+
+
+def test_pipeline_cannot_act_as_owner_of_an_ownerless_series():
+    """Regression for the class of bug where an identity with an empty oid
+    compares equal to owner_oid == '' (pre-auth data)."""
+    _insert_legacy("legacy-pipe")
+    r = c.delete(f"/api/series/legacy-pipe/members/{EDITOR_OID}", headers=_pipeline_headers())
+    assert r.status_code == 403
+    assert c.delete("/api/series/legacy-pipe", headers=_pipeline_headers()).status_code == 403
+
+
+def test_pipeline_can_still_read_series_it_could_before():
+    sid = c.post("/api/series", json={"data": {"name": "readable"}}, headers=_as(OWNER_OID)).json()["id"]
+    assert c.get(f"/api/series/{sid}/bundle", headers=_pipeline_headers()).status_code == 200
+
+
+# --------------------------------------- import name leak (#70)
+def test_import_does_not_reveal_other_peoples_series_names():
+    c.post("/api/series", json={"data": {"name": "Secret Project"}}, headers=_as(OWNER_OID))
+    r = c.post("/api/import", json={"series": {"name": "Secret Project"}}, headers=_as(OUTSIDER_OID)).json()
+    assert r["name"] == "Secret Project"  # no "(imported)" suffix: the outsider can't see the owner's series
+
+
+def test_import_still_suffixes_a_collision_with_your_own_series():
+    c.post("/api/series", json={"data": {"name": "Mine"}}, headers=_as(OWNER_OID))
+    r = c.post("/api/import", json={"series": {"name": "Mine"}}, headers=_as(OWNER_OID)).json()
+    assert r["name"] == "Mine (imported)"
 
 
 # ------------------------------------------------------------ users listing

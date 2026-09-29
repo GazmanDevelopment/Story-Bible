@@ -27,9 +27,12 @@ keeps behaving exactly as before with no other change required).
                     send it in the X-Token header
   ENTRA_TENANT_ID   required for AUTH_MODE=entra
   ENTRA_CLIENT_ID   required for AUTH_MODE=entra
-  ALLOWED_OIDS      optional comma-separated allowlist of Entra object ids,
-                    defence in depth on top of Entra's own "assignment
-                    required" - unset means don't add this extra check
+  ALLOWED_OIDS      comma-separated allowlist of Entra object ids, defence in
+                    depth on top of Entra's own "assignment required".
+                    Required for AUTH_MODE=entra; "*" deliberately allows
+                    everyone Entra lets in (#70)
+  LEGACY_OWNER_OID  the one Entra object id that owns series created before
+                    sign-in existed; unset = nobody claims them (#70)
 
 Nightly backups (VACUUM INTO + a JSON export per series) run in-process -
 see app/backup.py for BACKUP_DIR/BACKUP_KEEP_DAYS/BACKUP_HOUR and the
@@ -41,6 +44,8 @@ see app/github_feedback.py for GITHUB_FEEDBACK_TOKEN (#22).
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -97,6 +102,20 @@ def init_db() -> None:
         con.execute("PRAGMA journal_mode = WAL")  # persisted in the file; no need to reset per connection
         con.isolation_level = None  # autocommit; migrate() drives its own transactions
         migrate(con)
+        if auth.AUTH_MODE == "none":
+            logger.warning(
+                "AUTH_MODE=none: the API has NO authentication - anyone who can reach this "
+                "port can read and delete every series. Set STORYBIBLE_TOKEN or AUTH_MODE=entra.")
+        if auth.AUTH_MODE == "entra":
+            if auth.LEGACY_OWNER_OID and auth.ALLOWED_OIDS and auth.LEGACY_OWNER_OID not in auth.ALLOWED_OIDS:
+                logger.warning(
+                    "LEGACY_OWNER_OID is not in ALLOWED_OIDS, so that person can never sign in "
+                    "and pre-sign-in series will stay unclaimed.")
+            n = con.execute("SELECT COUNT(*) FROM series WHERE owner_oid=''").fetchone()[0]
+            if n and not auth.LEGACY_OWNER_OID:
+                logger.warning(
+                    "%d series have no owner (they predate sign-in) and no signed-in person can see them "
+                    "until LEGACY_OWNER_OID is set to the Entra object id who should own them.", n)
     finally:
         con.close()
 
@@ -194,8 +213,7 @@ def _sanitize_for_log(s: str) -> str:
 # ------------------------------------------------------------------------- auth
 def upsert_user(con: sqlite3.Connection, user: auth.CurrentUser) -> bool:
     """Record/refresh a signed-in person in the `users` table (#10).
-    Returns True the first time this oid is ever seen - the caller uses
-    that to claim any ownerless series for them (#11)."""
+    Returns True the first time this oid is ever seen."""
     now = time.time()
     row = con.execute("SELECT oid FROM users WHERE oid=?", (user.oid,)).fetchone()
     if row:
@@ -223,7 +241,12 @@ def get_current_user(
     if auth.AUTH_MODE == "none":
         return auth.LOCAL_USER
     if auth.AUTH_MODE == "token":
-        if auth.TOKEN and x_token != auth.TOKEN:
+        # compare_digest on fixed-length digests: a plain != short-circuits
+        # on the first differing byte, and compare_digest alone still
+        # returns early on a length mismatch (#70).
+        if auth.TOKEN and not hmac.compare_digest(
+            hashlib.sha256((x_token or "").encode()).digest(), hashlib.sha256(auth.TOKEN.encode()).digest()
+        ):
             raise HTTPException(status_code=401, detail="Bad or missing X-Token")
         return auth.SHARED_USER
     # entra
@@ -242,11 +265,27 @@ def get_current_user(
         # (a single writer, PLAN.md) makes negligible - see #12's PR
         # discussion if usage ever grows enough to matter.
         with db() as con:
-            is_new = upsert_user(con, user)
-            if is_new:
-                # #11: the first person to ever sign in claims any series
-                # left over from before auth existed (owner_oid == '').
+            upsert_user(con, user)
+            if (auth.LEGACY_OWNER_OID and user.oid == auth.LEGACY_OWNER_OID
+                    and con.execute("SELECT 1 FROM series WHERE owner_oid='' LIMIT 1").fetchone()):
+                # #11/#70: series left over from before auth existed
+                # (owner_oid == '') go to the one person named in
+                # LEGACY_OWNER_OID - NOT to whoever happens to sign in
+                # first, which let any unintended tenant user take them.
+                # The SELECT keeps this a read (no write lock) once
+                # everything has been claimed.
                 con.execute("UPDATE series SET owner_oid=? WHERE owner_oid=''", (user.oid,))
+    return user
+
+
+def require_person(user: auth.CurrentUser = Depends(get_current_user)) -> auth.CurrentUser:
+    """For routes that create data or expose directory information: the
+    review pipeline is documented as read-only (#10, PLAN.md Phase 6), and
+    require_access() only protects *existing* series - creating a new one,
+    importing, filing feedback and listing users have no series to check,
+    so they need this instead (#70)."""
+    if user.is_pipeline:
+        raise HTTPException(403, "The review pipeline is read-only")
     return user
 
 
@@ -544,7 +583,7 @@ class UserOut(BaseModel):
 
 
 @app.get("/api/users", tags=["auth"], response_model=list[UserOut])
-def list_users(user: auth.CurrentUser = Depends(get_current_user)):
+def list_users(user: auth.CurrentUser = Depends(require_person)):
     """People who have signed in at least once (#11) - for picking who to
     share a series with. Not scoped to any one series; being listed here
     only means "known to this server", the same low bar as showing up in
@@ -566,7 +605,7 @@ def list_series(user: auth.CurrentUser = Depends(get_current_user)):
 
 
 @app.post("/api/series", tags=["series"])
-def create_series(body: Body, user: auth.CurrentUser = Depends(get_current_user)):
+def create_series(body: Body, user: auth.CurrentUser = Depends(require_person)):
     sid = new_id()
     data = validate_series(clean(body.data))
     now = time.time()
@@ -625,7 +664,7 @@ def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
 
 
 @app.post("/api/import", tags=["series"])
-def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(get_current_user)):
+def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(require_person)):
     """Restore an exported bundle as a NEW series (ids are remapped)."""
     if not isinstance(bundle_in.get("series"), dict):
         raise HTTPException(400, "Not a Story Bible export")
@@ -648,7 +687,17 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(ge
     if not name_was_given:
         sdata["name"] = "Imported"
     with db() as con:
-        existing = {json.loads(r["data"]).get("name") for r in con.execute("SELECT data FROM series")}
+        # Only series this caller can see: comparing against everyone's
+        # made the "(imported)" suffix reveal that somebody else has a
+        # series with this name (#70).
+        visible = accessible_series_ids(con, user)
+        if visible is None:
+            rows = con.execute("SELECT data FROM series").fetchall()
+        else:
+            rows = con.execute(
+                f"SELECT data FROM series WHERE id IN ({','.join('?' * len(visible))})", tuple(visible)
+            ).fetchall()
+        existing = {json.loads(r["data"]).get("name") for r in rows}
     if sdata["name"] in existing:
         sdata["name"] += " (imported)"
     for k in KINDS:
@@ -737,6 +786,8 @@ def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUse
 @app.delete("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=DeletedOut)
 def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(get_current_user)):
     """The owner can remove anyone; anyone can remove themselves (leave)."""
+    if user.is_pipeline:
+        raise HTTPException(403, "The review pipeline is read-only")
     with db() as con:
         require_access(con, user, series_id, "read")
         if auth.AUTH_MODE == "entra":
@@ -842,7 +893,7 @@ def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = 
 
 # ---- feedback
 @app.post("/api/feedback", status_code=201, tags=["feedback"])
-async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends(get_current_user)):
+async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends(require_person)):
     """Files a GitHub issue from the pane's "Log Issue"/"Log Suggestion"
     buttons - see app/github_feedback.py. async because it awaits an
     outbound HTTPS call (httpx.AsyncClient) rather than blocking the

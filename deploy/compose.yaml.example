@@ -49,7 +49,10 @@ services:
       STORYBIBLE_TOKEN: ""
       ENTRA_TENANT_ID: ""
       ENTRA_CLIENT_ID: ""
+      # REQUIRED for AUTH_MODE=entra (or "*" to allow everyone Entra lets in),
+      # and LEGACY_OWNER_OID is who owns pre-sign-in series - see .env.example.
       ALLOWED_OIDS: ""
+      LEGACY_OWNER_OID: ""
       # The pane's "Log Issue"/"Log Suggestion" buttons (#22) - a
       # fine-grained GitHub PAT, scoped to just this repo, Issues: write
       # only. Blank means filing returns 503 rather than crashing.
