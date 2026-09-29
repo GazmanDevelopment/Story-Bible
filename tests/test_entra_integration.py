@@ -121,7 +121,10 @@ def test_first_request_records_a_users_row(entra_mode):
     assert row["first_seen"] == row["last_seen"]
 
 
-def test_second_request_updates_last_seen_not_first_seen(entra_mode):
+def test_second_request_updates_last_seen_not_first_seen(entra_mode, monkeypatch):
+    # last_seen is normally refreshed at most every LAST_SEEN_REFRESH_SECONDS (#72);
+    # 0 makes every request refresh it, which is what this test is about.
+    monkeypatch.setattr(main, "LAST_SEEN_REFRESH_SECONDS", 0)
     oid = "eeeeeeee-0000-0000-0000-000000000005"
     c.get("/api/me", headers=_auth(_token(oid=oid)))
     with main.db() as con:

@@ -89,12 +89,23 @@ def _v4_concurrency_and_audit(con: sqlite3.Connection) -> None:
         con.execute(f"ALTER TABLE {table} ADD COLUMN updated_by TEXT NOT NULL DEFAULT ''")
 
 
+def _v5_access_indexes(con: sqlite3.Connection) -> None:
+    """#72: list_series filters by `owner_oid = ? OR id IN (SELECT series_id
+    FROM members WHERE oid = ?)`. Neither column was indexed (members'
+    primary key leads with series_id), so every series list scanned - and
+    read the JSON of - every series in the database. IF NOT EXISTS so a
+    database that somehow already has them upgrades cleanly."""
+    con.execute("CREATE INDEX IF NOT EXISTS ix_series_owner ON series(owner_oid)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_members_oid ON members(oid)")
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
     _v2_users_table,
     _v3_ownership_and_sharing,
     _v4_concurrency_and_audit,
+    _v5_access_indexes,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

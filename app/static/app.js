@@ -48,8 +48,13 @@ function toast(msg, type = "info") {
 // response, not a network failure) and, for a 409, `.detail` (the raw
 // conflict payload - {error, current, updated_by} - so a caller can build
 // a real reload/keep-mine prompt instead of just reading the message).
-async function api(path, method = "GET", body) {
+// #72: `opts.ifNoneMatch` sends a conditional GET and a 304 resolves to
+// NOT_MODIFIED; `opts.etagOut` (an object) receives the response's ETag.
+// (The browser's own HTTP cache can't do this for us: /api/* is no-store.)
+const NOT_MODIFIED = Symbol("not modified");
+async function api(path, method = "GET", body, opts = {}) {
   const headers = { "Content-Type": "application/json" };
+  if (opts.ifNoneMatch) headers["If-None-Match"] = opts.ifNoneMatch;
   if (S.config?.authMode === "entra") {
     const token = await getAuthToken();
     if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -65,6 +70,8 @@ async function api(path, method = "GET", body) {
     // resolving with a response - a raw "Failed to fetch" isn't useful.
     throw new Error("Can't reach the server - check your connection and try again");
   }
+  if (res.status === 304) return NOT_MODIFIED;
+  if (opts.etagOut) opts.etagOut.etag = res.headers.get("ETag");
   if (!res.ok) {
     if (res.status === 401) {
       // A stale/expired token in entra mode: the header's cached account
@@ -296,10 +303,50 @@ async function insertText(text) {
 
 // ------------------------------------------------------------------- loading
 async function loadSeriesList() {
-  S.seriesList = await api("/series");
+  // summary: just id/name/version - the picker needs nothing else, and a
+  // series' full settings can be very large (#72).
+  S.seriesList = await api("/series?summary=true");
 }
+// Bumped whenever S.b is replaced or patched, so a background request that
+// was already in flight can tell its answer is out of date and drop it (#72).
+let bundleGen = 0;
 async function loadBundle() {
-  S.b = S.sid ? await api(`/series/${S.sid}/bundle`) : null;
+  if (!S.sid) { S.b = null; S.bEtag = null; bundleGen++; return; }
+  const out = {};
+  const r = await api(`/series/${S.sid}/bundle`, "GET", undefined, { etagOut: out });
+  S.b = r; S.bEtag = out.etag || null; bundleGen++;
+}
+// #72: after a save/add the server's response is the record itself, so patch
+// local state from it instead of re-downloading the whole bundle. (Deletes
+// still reload: the server cascades into other records that reference the
+// deleted one.) The bundle's ETag no longer matches once we've patched.
+function putLocal(kind, record) {
+  const list = S.b[kind], i = list.findIndex((x) => x.id === record.id);
+  if (i >= 0) list[i] = record; else list.push(record);
+  S.bEtag = null; bundleGen++;
+}
+// Pick up other people's changes without a reload: on window focus, tab
+// switch or coming back to the pane. Only ever when no form is open - a
+// form holds the version it was loaded at, and swapping the data under it
+// would let a save silently overwrite someone else's edit (defeating #12).
+let lastRevalidate = 0;
+const formOpen = () => !!(S.view || $("#main form") || !$("#modalOverlay").hidden);
+async function revalidateBundle() {
+  if (!S.sid || !S.b || formOpen()) return;
+  if (Date.now() - lastRevalidate < 15000) return;
+  lastRevalidate = Date.now();
+  const sid = S.sid, gen = bundleGen, out = {};
+  try {
+    const r = await api(`/series/${sid}/bundle`, "GET", undefined, { ifNoneMatch: S.bEtag || undefined, etagOut: out });
+    // Re-check AFTER the round trip, before touching any state: in that time
+    // the user may have opened a form (a save from it would then carry the
+    // refreshed version with stale field values and overwrite someone's edit
+    // without a 409), saved something (this answer predates it), or switched
+    // series. Any of those means this response is discarded.
+    if (r === NOT_MODIFIED || S.sid !== sid || bundleGen !== gen || formOpen()) return;
+    S.b = r; S.bEtag = out.etag || null; bundleGen++;
+    render();
+  } catch { /* a background refresh: stay quiet, the next real action will surface any error */ }
 }
 async function selectSeries(id) {
   S.sid = id || null; S.view = null; lsSet("sb_series", S.sid || "");
@@ -792,7 +839,7 @@ async function onClick(ev) {
     switch (act) {
       case "open": S.view = { kind: t.dataset.kind, id: t.dataset.id }; render(); window.scrollTo(0, 0); break;
       case "new": S.view = { kind: t.dataset.kind, id: null }; render(); break;
-      case "cancel": if (!(await confirmDiscard())) return; S.view = null; render(); break;
+      case "cancel": if (!(await confirmDiscard())) return; S.view = null; render(); revalidateBundle(); break;
       case "chip": t.classList.toggle("on"); break;
       case "modal-cancel": closeModal(false); break;
       case "modal-confirm": closeModal(true); break;
@@ -801,11 +848,12 @@ async function onClick(ev) {
       case "delete": {
         if (!t.classList.contains("armed")) { t.classList.add("armed"); t.textContent = "Confirm delete"; return; }
         await api(`/series/${S.sid}/${t.dataset.kind}/${S.view.id}`, "DELETE");
-        S.view = null; await loadBundle(); render(); toast("Deleted"); break;
+        S.view = null; await loadBundle(); render(); toast("Deleted"); break;  // full reload: the server cascades
       }
       case "delete-series": {
         if (!t.classList.contains("armed")) { t.classList.add("armed"); t.textContent = "Delete EVERYTHING in this series?"; return; }
-        await api(`/series/${S.sid}`, "DELETE"); await loadSeriesList();
+        await api(`/series/${S.sid}`, "DELETE");
+        S.seriesList = S.seriesList.filter((s) => s.id !== S.sid);
         await selectSeries(S.seriesList[0]?.id); toast("Series deleted"); break;
       }
       case "add-field": {
@@ -817,15 +865,20 @@ async function onClick(ev) {
       case "add-rel": {
         const type = $("#relType").value.trim(), to = $("#relTo").value;
         if (!type || !to) { toast("Pick a type and a character"); return; }
-        await api(`/series/${S.sid}/relationships`, "POST",
+        const created = await api(`/series/${S.sid}/relationships`, "POST",
           { data: { from: S.view.id, to, type, note: $("#relNote").value.trim() } });
-        await refreshKeepForm(); break;
+        putLocal("relationships", created); render(); break;
       }
-      case "del-rel": await api(`/series/${S.sid}/relationships/${t.dataset.id}`, "DELETE"); await refreshKeepForm(); break;
+      case "del-rel": {
+        await api(`/series/${S.sid}/relationships/${t.dataset.id}`, "DELETE");
+        // Nothing references a relationship, so there's no server cascade to fetch.
+        S.b.relationships = S.b.relationships.filter((x) => x.id !== t.dataset.id); S.bEtag = null; bundleGen++;
+        render(); break;
+      }
       case "add-chapter": {
         const title = $("#chTitle").value.trim(); if (!title) return;
-        await api(`/series/${S.sid}/chapters`, "POST", { data: { number: Number($("#chNum").value) || 0, title } });
-        await loadBundle(); render(); break;
+        putLocal("chapters", await api(`/series/${S.sid}/chapters`, "POST", { data: { number: Number($("#chNum").value) || 0, title } }));
+        render(); break;
       }
       case "del-chapter": await api(`/series/${S.sid}/chapters/${t.dataset.id}`, "DELETE"); await loadBundle(); render(); break;
       case "doc-link": saveDocLink({ series_id: S.sid, chapter_id: "" }); render(); break;
@@ -864,10 +917,6 @@ async function onClick(ev) {
   } catch (err) { toast(err.message, "error"); console.error(err); }
 }
 
-async function refreshKeepForm() {
-  const v = S.view; await loadBundle(); S.view = v; render();
-}
-
 async function newSeries() {
   const s = await api("/series", "POST", { data: { name: "New series", anchor_mode: "relative",
     anchor_label: "Story start", character_fields: DEFAULT_FIELDS, relationship_types: REL_TYPES } });
@@ -890,14 +939,22 @@ async function save(kind, form) {
     // #12: PUT must send back the version this was loaded at, so a save
     // from a stale copy (someone else changed it meanwhile) 409s instead
     // of silently overwriting their edit.
+    let saved;
     try {
-      await api(`/series/${S.sid}`, "PUT", { data: { ...S.b.series, ...data }, version: S.b.series.version });
+      saved = await api(`/series/${S.sid}`, "PUT", { data: { ...S.b.series, ...data }, version: S.b.series.version });
     } catch (err) {
       if (err.status !== 409) throw err;
       await handleSaveConflict(err, async (current) => { S.b.series = current; await loadSeriesList(); });
       return;
     }
-    await loadSeriesList(); await loadBundle(); render(); toast("Saved"); return;
+    // The PUT returns the saved series: patch the bundle and the picker from it (#72).
+    S.b.series = saved; S.bEtag = null; bundleGen++;
+    const inList = S.seriesList.find((s) => s.id === saved.id);
+    if (inList) {
+      Object.assign(inList, { name: saved.name, version: saved.version, updated: saved.updated });
+      S.seriesList.sort((a, b) => (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase()));
+    }
+    render(); toast("Saved"); return;
   }
   if ((kind === "characters" || kind === "locations") && !data.name?.trim()) { toast("Name is required"); return; }
   if ((kind === "events" || kind === "research") && !data.title?.trim()) {
@@ -905,8 +962,9 @@ async function save(kind, form) {
   }
   if (S.view.id) {
     const prev = rec(kind, S.view.id);
+    let saved;
     try {
-      await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data }, version: prev.version });
+      saved = await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data }, version: prev.version });
     } catch (err) {
       if (err.status !== 409) throw err;
       await handleSaveConflict(err, (current) => {
@@ -915,10 +973,10 @@ async function save(kind, form) {
       });
       return;
     }
-    await refreshKeepForm();
+    putLocal(kind, saved); render();
   } else {
     const r = await api(`/series/${S.sid}/${kind}`, "POST", { data });
-    await loadBundle(); S.view = kind === "characters" ? { kind, id: r.id } : null; render();
+    putLocal(kind, r); S.view = kind === "characters" ? { kind, id: r.id } : null; render();
   }
   toast("Saved");
 }
@@ -964,9 +1022,12 @@ function wire() {
       } catch (err) { toast("Import failed: " + err.message, "error"); }
     }
   });
+  window.addEventListener("focus", revalidateBundle);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) revalidateBundle(); });
   document.querySelectorAll("#tabs button").forEach((b) => b.addEventListener("click", async () => {
     if (!(await confirmDiscard())) return;
     S.tab = b.dataset.tab; S.view = null; S.filter = ""; render();
+    revalidateBundle();  // (a no-op when the new tab opens a form, e.g. Series)
   }));
   $("#btnFind").addEventListener("click", () => findSelection().catch((e) => toast(e.message, "error")));
 }

@@ -362,3 +362,251 @@ def test_relationship_type_suggestions_are_editable_per_series(server, browser_p
     assert options == ["enemy of", "rival of"]
 
     assert not errors, errors
+
+
+# ------------------------------------------------------------------ #72
+def _record_api(pg):
+    """Every /api call the page makes from now on: (method, path, status, sent If-None-Match)."""
+    calls = []
+    pg.on("response", lambda r: "/api/" in r.url and calls.append((
+        r.request.method, r.url.split("/api", 1)[1], r.status, "if-none-match" in r.request.headers)))
+    return calls
+
+
+def test_saving_does_not_reload_the_whole_bundle(server, browser_page):
+    """#72: a save/add used to be followed by a full bundle download (and, for
+    the series form, the full series list too). The response to the save is
+    the record, so the pane patches its own state from it."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    calls = _record_api(pg)
+
+    pg.fill("[data-custom='Skin']", "Freckled")
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#toast.show")
+    assert [(m, p.split("/")[-2]) for m, p, *_ in calls] == [("PUT", "characters")], calls
+    assert pg.input_value("[data-custom='Skin']") == "Freckled"        # form re-rendered from the response
+    assert pg.evaluate("rec('characters', S.view.id).version") >= 2     # and local state has the new version
+
+    calls.clear()
+    pg.fill("#relType", "confides in")
+    pg.select_option("#relTo", label="Kristy Dunn")
+    pg.click("[data-act=add-rel]")
+    pg.wait_for_selector("text=Betsy Marr confides in Kristy Dunn")
+    assert [m for m, *_ in calls] == ["POST"], calls
+
+    calls.clear()
+    pg.click(".rel:has-text('confides in') [data-act=del-rel]")   # the one just added, not an existing relationship
+    pg.wait_for_selector("text=Betsy Marr confides in Kristy Dunn", state="detached")
+    assert [m for m, *_ in calls] == ["DELETE"], calls   # nothing references a relationship: no reload needed
+
+    # A saved edit can be saved again straight away (the patched version is current, so no 409).
+    pg.fill("[data-custom='Skin']", "Freckled and pale")
+    pg.click("[data-act=save]")
+    pg.wait_for_function("() => rec('characters', S.view.id).custom.Skin === 'Freckled and pale'")
+    assert not [e for e in errors if "409" in e], errors
+
+
+def test_a_new_record_appears_in_its_list_without_a_reload(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Timeline")
+    pg.wait_for_selector(".tl li")
+    pg.wait_for_timeout(300)   # let the tab-switch revalidation settle before counting
+    calls = _record_api(pg)
+    pg.click("[data-act=new]")
+    pg.fill("[data-f=title]", "Patched-in event")
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("text=Patched-in event")
+    assert [m for m, *_ in calls] == ["POST"], calls
+    assert not errors, errors
+
+
+def test_saving_series_settings_updates_the_picker_without_reloading_lists(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    calls = _record_api(pg)
+    pg.fill("[data-f=name]", "Zed - renamed")
+    pg.click("[data-act=save]")
+    pg.wait_for_function("() => document.querySelector('#seriesSelect').selectedOptions[0].textContent.includes('Zed')")
+    assert [m for m, *_ in calls] == ["PUT"], calls
+    # the picker is re-sorted locally: "Zed..." now sorts after the other series
+    labels = pg.eval_on_selector_all("#seriesSelect option", "os => os.map(o => o.textContent)")
+    named = [label for label in labels if not label.startswith("+")]
+    assert named == sorted(named, key=str.lower), named
+    assert not errors, errors
+
+
+def test_deleting_a_record_still_reloads_because_the_server_cascades(server, browser_page):
+    """Deleting a character also strips it from every place/event that
+    referenced it - server-side. The pane must pick that up (so: reload)."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Places")
+    pg.wait_for_selector(".list >> text=The Lake House")
+    pg.click(".list >> text=The Lake House")
+    pg.wait_for_selector("form[data-kind=locations]")
+    chip = pg.locator(".chip", has_text="Betsy Marr")
+    if "on" not in chip.get_attribute("class").split():   # the demo data may already have her here
+        chip.click()
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#toast.show")
+    pg.click("[data-act=cancel] >> nth=0")
+    pg.wait_for_selector(".list li")
+    assert "Betsy Marr" in pg.inner_text("main")
+
+    pg.click("#tabs >> text=Characters")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    pg.wait_for_timeout(300)
+    calls = _record_api(pg)
+    pg.click("[data-act=delete]")
+    pg.click("[data-act=delete]")   # armed: the second click confirms
+    pg.wait_for_selector(".list li")
+    assert [m for m, *_ in calls] == ["DELETE", "GET"], calls
+    pg.click("#tabs >> text=Places")
+    pg.wait_for_selector(".list >> text=The Lake House")
+    assert "Betsy Marr" not in pg.inner_text("main") and "?" not in pg.inner_text("main")
+    assert not errors, errors
+
+
+def test_an_unchanged_series_revalidates_with_a_304(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    assert pg.evaluate("!!S.bEtag")   # the initial bundle load recorded its ETag
+    calls = _record_api(pg)
+    pg.click("#tabs >> text=Places")
+    pg.wait_for_selector(".list li")
+    pg.wait_for_timeout(400)
+    gets = [c for c in calls if c[0] == "GET"]
+    assert gets and gets[0][2:] == (304, True), calls
+    assert not errors, errors
+
+
+def test_other_peoples_changes_show_up_on_the_next_tab_switch(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.evaluate("""async () => {
+        await fetch(`/api/series/${S.sid}/characters`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ data: { name: 'Added By Someone Else' } }) });
+    }""")
+    assert "Added By Someone Else" not in pg.inner_text("main")   # not pushed; the pane hasn't looked yet
+    pg.click("#tabs >> text=Places")
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Characters")
+    pg.wait_for_selector("text=Added By Someone Else")
+    assert not errors, errors
+
+
+def test_background_refresh_never_swaps_data_under_an_open_form(server, browser_page):
+    """The safety property: a form holds the version it was opened at, and a
+    save from it must 409 if someone else changed the record meanwhile. If a
+    background refresh replaced the data under the form, the save would send
+    the new version with stale field values and silently overwrite them."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    pg.evaluate("""async () => {
+        const c = rec('characters', S.view.id);
+        await fetch(`/api/series/${S.sid}/characters/${c.id}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ data: { ...c, role: 'Changed elsewhere' }, version: c.version }) });
+    }""")
+    pg.fill("[data-f=role]", "My unsaved edit")
+    calls = _record_api(pg)
+    pg.evaluate("lastRevalidate = 0; revalidateBundle()")
+    pg.wait_for_timeout(400)
+    assert not [c for c in calls if c[0] == "GET"], calls          # didn't even ask
+    assert pg.input_value("[data-f=role]") == "My unsaved edit"
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")            # the conflict is still caught
+    assert "Changed by" in pg.inner_text("#modalMessage")
+    unexpected = [e for e in errors if "409" not in e]
+    assert not unexpected, unexpected
+
+
+def test_background_refresh_skips_the_series_settings_form_too(server, browser_page):
+    """The Series tab is a form with S.view null - it must be protected as well."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    pg.wait_for_timeout(300)
+    pg.fill("[data-f=name]", "Half-typed name")
+    calls = _record_api(pg)
+    pg.evaluate("lastRevalidate = 0; revalidateBundle()")
+    pg.wait_for_timeout(400)
+    assert not calls, calls
+    assert pg.input_value("[data-f=name]") == "Half-typed name"
+    assert not errors, errors
+
+
+def test_a_refresh_that_lands_after_a_form_opened_is_discarded(server, browser_page):
+    """The race: a background refresh is already in flight when the user opens
+    a record. When the answer arrives it must NOT replace the data under the
+    now-open form - otherwise Save would send the refreshed version with the
+    stale field values and silently overwrite the other person's edit."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    original = pg.evaluate("rec('characters', S.b.characters.find(c => c.name === 'Betsy Marr').id).version")
+    pg.evaluate("""async () => {
+        const c = S.b.characters.find(x => x.name === 'Betsy Marr');
+        await fetch(`/api/series/${S.sid}/characters/${c.id}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ data: { ...c, role: 'Changed elsewhere' }, version: c.version }) });
+    }""")
+    held = []
+    pg.route("**/api/series/*/bundle", lambda route: held.append(route))
+    pg.evaluate("() => { lastRevalidate = 0; revalidateBundle(); }")   # fire and forget: the response is held
+    for _ in range(50):
+        if held:
+            break
+        pg.wait_for_timeout(100)
+    assert held, "the background refresh never went out"
+
+    pg.click("text=Betsy Marr")                      # the form opens from the OLD data while the refresh is in flight
+    pg.wait_for_selector("form[data-kind=characters]")
+    pg.fill("[data-f=role]", "My edit")
+    held[0].continue_()                              # ...now the (newer) answer arrives
+    pg.wait_for_timeout(500)
+
+    assert pg.evaluate("rec('characters', S.view.id).version") == original     # not swapped in
+    assert pg.input_value("[data-f=role]") == "My edit"
+    pg.unroute("**/api/series/*/bundle")
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")                        # so the conflict is still caught
+    assert "Changed by" in pg.inner_text("#modalMessage")
+    unexpected = [e for e in errors if "409" not in e]
+    assert not unexpected, unexpected
+
+
+def test_leaving_a_form_looks_for_other_peoples_changes(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    pg.evaluate("""async () => {
+        await fetch(`/api/series/${S.sid}/characters`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ data: { name: 'Added While You Were Editing' } }) });
+        lastRevalidate = 0;
+    }""")
+    pg.click("[data-act=cancel]")
+    pg.wait_for_selector("text=Added While You Were Editing")
+    assert not errors, errors
