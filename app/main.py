@@ -412,7 +412,9 @@ DEFAULT_CSP = "; ".join([
     "base-uri 'self'",
     "form-action 'self'",
 ])
-CONTENT_SECURITY_POLICY = os.environ.get("CONTENT_SECURITY_POLICY", DEFAULT_CSP).strip()
+# `or`: a blank value (CONTENT_SECURITY_POLICY: "" in a compose file) means "use
+# the default", not "no CSP" - turning it off takes an explicit "off".
+CONTENT_SECURITY_POLICY = os.environ.get("CONTENT_SECURITY_POLICY", "").strip() or DEFAULT_CSP
 
 
 def response_headers(path: str) -> list[tuple[str, str]]:
@@ -425,10 +427,15 @@ def response_headers(path: str) -> list[tuple[str, str]]:
     headers = [
         ("Cache-Control", "no-store" if path.startswith("/api/") else "no-cache"),
         ("X-Content-Type-Options", "nosniff"),
-        ("Referrer-Policy", "no-referrer"),
+        # Not "no-referrer": research entries may embed external images, and
+        # hosts with hotlink protection reject a request with no Referer at all.
+        ("Referrer-Policy", "strict-origin-when-cross-origin"),
         ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
     ]
-    if CONTENT_SECURITY_POLICY and CONTENT_SECURITY_POLICY.lower() != "off":
+    # Swagger UI / ReDoc (only served with ENABLE_API_DOCS) use an inline script
+    # and jsdelivr-hosted assets, which this policy forbids - they're a dev
+    # tool, not the pane, so they're exempt rather than loosening it for all.
+    if path not in ("/docs", "/redoc") and CONTENT_SECURITY_POLICY.lower() != "off":
         headers.append(("Content-Security-Policy", CONTENT_SECURITY_POLICY))
     return headers
 
@@ -513,7 +520,9 @@ class HardeningMiddleware:
                 await self.app(scope, limited_receive, guarded_send)
             except BodyTooLarge:
                 pass
-        if exceeded:
+        if exceeded and status is None:
+            # (If the app had already started its own response before the cap
+            # tripped there's nothing sane left to send; it's been truncated.)
             await too_large(scope, receive, emit)
         if status is not None:
             elapsed_ms = (time.perf_counter() - start) * 1000
@@ -529,9 +538,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     Starlette's bare default 500 response - unlogged, with no Cache-Control
     set at all. This runs in ServerErrorMiddleware, outside
     HardeningMiddleware (see its docstring), so it has to do both itself."""
-    logger.exception("%s %s 500 (unhandled)", request.method, _sanitize_for_log(request.url.path))
+    path = request.scope["path"]  # same source HardeningMiddleware uses, so the two agree
+    logger.exception("%s %s 500 (unhandled)", request.method, _sanitize_for_log(path))
     response = JSONResponse({"detail": "Internal server error"}, status_code=500)
-    for name, value in response_headers(request.url.path):
+    for name, value in response_headers(path):
         response.headers[name] = value
     return response
 
@@ -542,7 +552,13 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     so a malformed-JSON POST from someone with no credentials at all used to
     get a 422 (and a free JSON parse) instead of a 401 (#69). Every other
     validation error is raised after the auth dependency has already
-    succeeded, so only the JSON-syntax case needs the check repeated here."""
+    succeeded, so only the JSON-syntax case needs the check repeated here.
+    Authentication only: a signed-in caller who then fails a route-level
+    permission check (require_person / require_access) still sees a 422 for
+    malformed JSON rather than 403/404, since those checks need the parsed
+    body's route context. It repeats get_current_user, so in entra mode that
+    request pays for a second token validation - acceptable for a rare error
+    path."""
     if request.url.path.startswith("/api/") and any(e.get("type") == "json_invalid" for e in exc.errors()):
         try:
             await run_in_threadpool(

@@ -145,7 +145,7 @@ def test_other_validation_errors_are_untouched(monkeypatch):
 # ---------------------------------------------------- security headers (#69)
 def _assert_secure(r):
     assert r.headers["x-content-type-options"] == "nosniff"
-    assert r.headers["referrer-policy"] == "no-referrer"
+    assert r.headers["referrer-policy"] == "strict-origin-when-cross-origin"
     assert "camera=()" in r.headers["permissions-policy"]
     assert r.headers["content-security-policy"] == main.CONTENT_SECURITY_POLICY
 
@@ -221,3 +221,52 @@ def test_the_app_never_builds_inline_handlers():
     dead under the CSP (all interaction goes through data-act instead)."""
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert not re.search(r"""\son(click|change|input|submit|load|error)\s*=""", js)
+
+
+# ------------------------------------------------------ review follow-ups
+def test_a_blank_csp_setting_means_the_default_not_no_csp(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+    env = {k: v for k, v in os.environ.items() if k not in ("CONTENT_SECURITY_POLICY", "STORYBIBLE_TOKEN", "AUTH_MODE")}
+    env.update(CONTENT_SECURITY_POLICY="   ", STORYBIBLE_DB=str(tmp_path / "x.db"), PYTHONUTF8="1")
+    out = subprocess.run(
+        [sys.executable, "-c", "from app import main; print(main.CONTENT_SECURITY_POLICY == main.DEFAULT_CSP)"],
+        cwd=Path(__file__).resolve().parent.parent, env=env, capture_output=True, text=True, timeout=60)
+    assert out.stdout.strip().splitlines()[-1] == "True", out.stderr
+
+
+def test_swagger_and_redoc_pages_are_exempt_from_the_csp():
+    """They need an inline script and jsdelivr assets; the suite runs with
+    ENABLE_API_DOCS=true (tests/conftest.py), so they exist here."""
+    for path in ("/docs", "/redoc"):
+        r = c.get(path)
+        assert r.status_code == 200
+        assert "content-security-policy" not in r.headers
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+
+def test_a_response_the_app_already_started_is_not_followed_by_a_second_start():
+    """If the cap trips after the app has begun replying there is nothing
+    sane to add - in particular no second http.response.start."""
+    async def app_that_replies_first(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await receive()  # trips the cap after the response has started
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    mw = main.HardeningMiddleware(app_that_replies_first)
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    async def receive():
+        return {"type": "http.request", "body": b"x" * 100, "more_body": False}
+
+    scope = {"type": "http", "method": "POST", "path": "/api/series", "headers": [], "query_string": b""}
+    original = main.MAX_BODY_BYTES
+    main.MAX_BODY_BYTES = 10
+    try:
+        asyncio.run(mw(scope, receive, send))
+    finally:
+        main.MAX_BODY_BYTES = original
+    assert [m["type"] for m in sent].count("http.response.start") == 1

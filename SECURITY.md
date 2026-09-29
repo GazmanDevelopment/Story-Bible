@@ -51,7 +51,7 @@ on a machine you control.
 ## Response headers and request limits
 
 Every response carries `X-Content-Type-Options: nosniff`,
-`Referrer-Policy: no-referrer`, a restrictive `Permissions-Policy`, and a
+`Referrer-Policy: strict-origin-when-cross-origin`, a restrictive `Permissions-Policy`, and a
 `Content-Security-Policy` (no inline scripts, no `eval`, scripts only from the
 app itself and Microsoft's Office.js host; `CONTENT_SECURITY_POLICY` overrides
 it). Request bodies are capped while they stream (`MAX_BODY_BYTES`, and
