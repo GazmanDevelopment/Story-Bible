@@ -2,13 +2,16 @@
 Story Bible - backend for the Word task-pane add-in.
 
 A small FastAPI + SQLite service. Every record belongs to a Series.
-Records are stored as JSON blobs so new *fields* can be added in the UI
-without a schema change. Schema changes themselves (new tables/columns)
+Records are stored as JSON blobs so new *fields* can be added without a
+database migration (a field does have to be declared in app/models.py to be
+kept - unknown fields are dropped, see there). Schema changes themselves (new tables/columns)
 are handled by app/migrations.py and applied automatically on startup.
 
 Env vars:
   STORYBIBLE_DB     path to the SQLite file   (default /data/storybible.db)
   MAX_BODY_BYTES    request body size cap, in bytes (default 5 MiB)
+  MAX_RECORDS_PER_SERIES / MAX_SERIES_PER_OWNER  ceilings on how much one
+                    series / one person can hold (defaults 20000 / 200, #71)
   ENABLE_API_DOCS   serve /docs, /redoc and /openapi.json, unauthenticated
                     (default off - see API_DOCS_ENABLED, #68)
   IMPORT_MAX_BODY_BYTES  body size cap for /api/import specifically, in
@@ -74,7 +77,7 @@ from . import auth
 from . import backup as backup_mod
 from . import github_feedback as feedback_mod
 from .migrations import migrate
-from .models import KIND_MODELS, SeriesIn
+from .models import KIND_MODELS, MAX_ID, MAX_SHORT, REF_FIELDS, SeriesIn
 
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
 # Swagger UI / ReDoc / openapi.json (#45) describe every route and are served
@@ -83,6 +86,12 @@ DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
 API_DOCS_ENABLED = os.environ.get("ENABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", 5 * 1024 * 1024))
 IMPORT_MAX_BODY_BYTES = int(os.environ.get("IMPORT_MAX_BODY_BYTES", 20 * 1024 * 1024))
+# Per-series and per-person ceilings (#71): field sizes are bounded in
+# app/models.py, and these bound how many of them there can be. Generous for a
+# story bible (20,000 records is far beyond any real one); they exist so a
+# runaway client or import loop can't fill the dataset.
+MAX_RECORDS_PER_SERIES = int(os.environ.get("MAX_RECORDS_PER_SERIES", 20_000))
+MAX_SERIES_PER_OWNER = int(os.environ.get("MAX_SERIES_PER_OWNER", 200))
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Record kinds that hang off a series
@@ -132,13 +141,21 @@ def init_db() -> None:
 
 
 @contextmanager
-def db():
+def db(write: bool = False):
+    """`write=True` takes SQLite's write lock immediately (BEGIN IMMEDIATE)
+    instead of at the first INSERT/UPDATE. Use it wherever a handler *checks*
+    something and then writes on the strength of the check (a quota, a
+    reference, a version): with Python's default lazy transactions those
+    reads run outside any transaction, so a concurrent write could slip in
+    between the check and the insert (#71)."""
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA busy_timeout = 5000")   # wait rather than fail when another save holds the write lock
     con.execute("PRAGMA synchronous = NORMAL")  # safe with WAL; avoids an fsync on every write
     try:
+        if write:
+            con.execute("BEGIN IMMEDIATE")
         yield con
         con.commit()
     finally:
@@ -185,6 +202,68 @@ def validate_record(kind: str, data: dict) -> dict:
         return KIND_MODELS[kind](**data).model_dump(by_alias=True)
     except ValidationError as e:
         raise HTTPException(400, str(e))
+
+
+def check_series_quota(con, user: auth.CurrentUser) -> None:
+    owned = con.execute("SELECT COUNT(*) FROM series WHERE owner_oid=?", (user.oid,)).fetchone()[0]
+    if owned >= MAX_SERIES_PER_OWNER:
+        raise HTTPException(400, f"Series limit reached ({owned} of {MAX_SERIES_PER_OWNER})")
+
+
+def iter_refs(kind: str, data: dict):
+    """Every (field, referenced id) in a record - see models.REF_FIELDS."""
+    for field in REF_FIELDS.get(kind, {}):
+        v = data.get(field)
+        if isinstance(v, list):
+            for x in v:
+                yield field, x
+        elif v:
+            yield field, v
+
+
+def check_refs(con, series_id: str, kind: str, data: dict, already: frozenset = frozenset()) -> None:
+    """400 if a record points at an id that isn't a record of the right kind
+    in THIS series (#71) - otherwise one series could reference another's ids,
+    and a typo would silently produce a dangling link. `already` is the
+    (field, id) pairs the stored record had before this edit: those are not
+    re-checked, or a record that arrived with a dangling link (from an older
+    import) could never be saved again - only *new* links must resolve."""
+    refs = [ref for ref in iter_refs(kind, data) if ref not in already]
+    if not refs:
+        return
+    found: dict[str, str] = {}
+    ids = sorted({r for _, r in refs})
+    for i in range(0, len(ids), 500):  # stay well under SQLite's variable limit
+        chunk = ids[i:i + 500]
+        for row in con.execute(
+            f"SELECT id, kind FROM records WHERE series_id=? AND id IN ({','.join('?' * len(chunk))})",
+            (series_id, *chunk),
+        ):
+            found[row["id"]] = row["kind"]
+    bad = sorted({f for f, r in refs if found.get(r) != REF_FIELDS[kind][f]})
+    if bad:
+        raise HTTPException(
+            400, f"{', '.join(bad)}: refers to a record that doesn't exist in this series (or is the wrong kind)")
+
+
+def scrub_refs(kind: str, data: dict, valid: dict[str, set[str]]) -> int:
+    """Import-side counterpart of check_refs: drop references that don't
+    resolve inside the bundle being imported (the old data may already have
+    had dangling ones, and a foreign id must never survive into the new
+    series). Returns how many were dropped."""
+    dropped = 0
+    for field, target in REF_FIELDS.get(kind, {}).items():
+        v = data.get(field)
+        if isinstance(v, list):
+            # isinstance first: an unhashable item (a dict) in a hand-edited
+            # bundle must be dropped, not raise on the set lookup.
+            keep = [x for x in v if isinstance(x, str) and x in valid[target]]
+            dropped += len(v) - len(keep)
+            data[field] = keep
+        elif v and not (isinstance(v, str) and v in valid[target]):
+            data[field] = ""
+            dropped += 1
+    return dropped
 
 
 # --------------------------------------------------------------------- health
@@ -403,7 +482,7 @@ DEFAULT_CSP = "; ".join([
     # Inline styles: the pane builds markup with style="..." attributes and
     # Quill positions its tooltips with inline styles.
     "style-src 'self' 'unsafe-inline'",
-    # Research entries may embed external images (the sanitizer allows http/https).
+    # Research entries may embed external images (the sanitizer allows http, https and data:).
     "img-src 'self' data: blob: https: http:",
     "font-src 'self' data:",
     "connect-src 'self' https://login.microsoftonline.com https://appsforoffice.microsoft.com",
@@ -773,7 +852,8 @@ def create_series(body: Body, user: auth.CurrentUser = Depends(require_person)):
     sid = new_id()
     data = validate_series(clean(body.data))
     now = time.time()
-    with db() as con:
+    with db(write=True) as con:
+        check_series_quota(con, user)
         con.execute(
             "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
             "VALUES (?,?,?,?,1,?,?)",
@@ -829,19 +909,27 @@ def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
 
 @app.post("/api/import", tags=["series"])
 def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(require_person)):
-    """Restore an exported bundle as a NEW series (ids are remapped)."""
+    """Restore an exported bundle as a NEW series (ids are remapped).
+
+    Everything is validated and remapped up front, and only then is the write
+    transaction opened to insert it (#71) - so a large or bad import never
+    holds SQLite's single write lock while it is being checked."""
     if not isinstance(bundle_in.get("series"), dict):
         raise HTTPException(400, "Not a Story Bible export")
     for k in KINDS:
         recs = bundle_in.get(k, [])
-        if not isinstance(recs, list) or not all(isinstance(r, dict) and r.get("id") for r in recs):
-            raise HTTPException(400, f"'{k}' must be a list of records, each with an id")
+        if not isinstance(recs, list) or not all(
+            isinstance(r, dict) and isinstance(r.get("id"), str) and 0 < len(r["id"]) <= MAX_ID for r in recs
+        ):
+            raise HTTPException(400, f"'{k}' must be a list of records, each with a string id (1-{MAX_ID} characters)")
     all_ids = [rec["id"] for k in KINDS for rec in bundle_in.get(k, [])]
     if len(all_ids) != len(set(all_ids)):
         # Two records sharing an id would collide in idmap below and both
         # get remapped to the same new id, tripping the records.id primary
         # key on insert (a 500) instead of a clean 400 here.
         raise HTTPException(400, "Duplicate record id in import bundle")
+    if len(all_ids) > MAX_RECORDS_PER_SERIES:
+        raise HTTPException(400, f"The bundle has {len(all_ids)} records, the limit per series is {MAX_RECORDS_PER_SERIES}")
 
     idmap: dict[str, str] = {}
     sid = new_id()
@@ -851,6 +939,8 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
     if not name_was_given:
         sdata["name"] = "Imported"
     with db() as con:
+        # (The series quota is checked below, inside the write lock, where it
+        # can't race with another create.)
         # Only series this caller can see: comparing against everyone's
         # made the "(imported)" suffix reveal that somebody else has a
         # series with this name (#70).
@@ -863,10 +953,12 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
             ).fetchall()
         existing = {json.loads(r["data"]).get("name") for r in rows}
     if sdata["name"] in existing:
-        sdata["name"] += " (imported)"
+        suffix = " (imported)"
+        sdata["name"] = sdata["name"][: MAX_SHORT - len(suffix)] + suffix  # stay inside the name limit
     for k in KINDS:
         for rec in bundle_in.get(k, []):
             idmap[rec["id"]] = new_id()
+    valid = {k: {idmap[rec["id"]] for rec in bundle_in.get(k, [])} for k in KINDS}
 
     def remap(v):
         if isinstance(v, str):
@@ -877,22 +969,39 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
             return {kk: remap(vv) for kk, vv in v.items()}
         return v
 
+    prepared: list[tuple[str, str, dict]] = []
+    dropped = 0
+    for k in KINDS:
+        for rec in bundle_in.get(k, []):
+            raw = remap(clean(rec))
+            # Scrub before validating: a dangling reference from old data can
+            # be an arbitrary (even over-long) foreign id, which would
+            # otherwise fail validation instead of simply being dropped.
+            lost = scrub_refs(k, raw, valid)
+            try:
+                data = validate_record(k, raw)
+            except HTTPException as e:
+                raise HTTPException(400, f"{k} record '{rec['id']}': {e.detail}")
+            dropped += lost
+            if k == "relationships" and lost:
+                dropped += 1  # a relationship missing an end is meaningless: skip it entirely
+                continue
+            prepared.append((idmap[rec["id"]], k, data))
+
     now = time.time()
-    with db() as con:
+    with db(write=True) as con:
+        check_series_quota(con, user)  # again, now inside the write lock, so two imports can't both squeeze in
         con.execute(
             "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
             "VALUES (?,?,?,?,1,?,?)",
             (sid, json.dumps(sdata), now, user.oid, user.oid, user.oid),
         )
-        for k in KINDS:
-            for rec in bundle_in.get(k, []):
-                data = validate_record(k, remap(clean(rec)))
-                con.execute(
-                    "INSERT INTO records (id, series_id, kind, data, updated, version, created_by, updated_by) "
-                    "VALUES (?,?,?,?,?,1,?,?)",
-                    (idmap[rec["id"]], sid, k, json.dumps(data), now, user.oid, user.oid),
-                )
-    return {"id": sid, "name": sdata["name"]}
+        con.executemany(
+            "INSERT INTO records (id, series_id, kind, data, updated, version, created_by, updated_by) "
+            "VALUES (?,?,?,?,?,1,?,?)",
+            [(rid, sid, k, json.dumps(data), now, user.oid, user.oid) for rid, k, data in prepared],
+        )
+    return {"id": sid, "name": sdata["name"], "dropped_references": dropped}
 
 
 # ---- sharing (#11)
@@ -980,8 +1089,12 @@ def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser 
     check_kind(kind)
     rid, now = new_id(), time.time()
     data = validate_record(kind, clean(body.data))
-    with db() as con:
+    with db(write=True) as con:
         require_access(con, user, series_id, "write")
+        count = con.execute("SELECT COUNT(*) FROM records WHERE series_id=?", (series_id,)).fetchone()[0]
+        if count >= MAX_RECORDS_PER_SERIES:
+            raise HTTPException(400, f"This series already has {count} records, the limit is {MAX_RECORDS_PER_SERIES}")
+        check_refs(con, series_id, kind, data)
         con.execute(
             "INSERT INTO records (id, series_id, kind, data, updated, version, created_by, updated_by) "
             "VALUES (?,?,?,?,?,1,?,?)",
@@ -995,10 +1108,19 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
     check_kind(kind)
     now = time.time()
     data = validate_record(kind, clean(body.data))
-    with db() as con:
+    with db(write=True) as con:
         require_access(con, user, series_id, "write")
         if body.version is None:
             raise HTTPException(428, "version is required")
+        current = con.execute(
+            "SELECT version, data FROM records WHERE id=? AND series_id=? AND kind=?", (rid, series_id, kind)
+        ).fetchone()
+        if current and current["version"] == body.version:
+            # Only for an up-to-date edit: a stale one falls through to the
+            # UPDATE below and gets the 409 conflict prompt (a deleted
+            # character's cascade bumps the versions of what referenced it),
+            # not a confusing 400 about a reference the user never touched.
+            check_refs(con, series_id, kind, data, frozenset(iter_refs(kind, json.loads(current["data"]))))
         cur = con.execute(
             "UPDATE records SET data=?, updated=?, version=version+1, updated_by=? "
             "WHERE id=? AND series_id=? AND kind=? AND version=?",
