@@ -48,7 +48,12 @@ def _as_sanitized_html(v: Any) -> str:
     text = _as_text(v)
     if len(text) > MAX_HTML:
         raise ValueError(f"must be at most {MAX_HTML:,} characters")
-    return sanitize_html(text)
+    clean_html = sanitize_html(text)
+    if len(clean_html) > MAX_HTML:
+        # Escaping can expand the input (& -> &amp; is 5x), so the cap has to
+        # hold for what is actually stored and sent back, not just what came in.
+        raise ValueError(f"must be at most {MAX_HTML:,} characters once cleaned")
+    return clean_html
 
 
 LooseStr = Annotated[str, BeforeValidator(_as_text)]

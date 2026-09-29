@@ -164,10 +164,33 @@ def test_plain_text_with_a_few_angle_brackets_is_fine():
     assert r.status_code == 200
 
 
-def test_https_and_data_images_kept_plain_http_dropped():
-    assert 'src="https://example.com/x.png"' in html_sanitize.sanitize_html('<img src="https://example.com/x.png">')
-    assert "data:image/png" in html_sanitize.sanitize_html('<img src="data:image/png;base64,AAAA">')
-    assert html_sanitize.sanitize_html('<img src="http://example.com/x.png">') == ""
+def test_all_three_image_schemes_are_still_accepted():
+    """S2 considered dropping plain http and decided against it: the sanitizer
+    only runs on write, so existing entries would silently lose the image at
+    their next save."""
+    for src in ("https://example.com/x.png", "http://example.com/x.png", "data:image/png;base64,AAAA"):
+        assert f'src="{src}"' in html_sanitize.sanitize_html(f'<img src="{src}">')
+
+
+def test_self_closing_and_unclosed_tags_are_not_counted_as_nesting():
+    """Depth is the real open-tag depth, not a running count of start tags."""
+    assert html_sanitize.sanitize_html("<p/>" * 300) == "<p></p>" * 300
+    assert html_sanitize.sanitize_html("<p>x" * 300).count("<p>") == 300    # HTML closes each <p> at the next
+    assert html_sanitize.sanitize_html("<li>x" * 300).count("<li>") == 300
+    assert html_sanitize.sanitize_html("</b>" * 500) == "</b>" * 500          # stray end tags don't underflow the counter
+    html_sanitize.sanitize_html("</b>" * 500 + "<b>" * html_sanitize.MAX_DEPTH)
+
+
+def test_closing_a_tag_closes_what_was_left_open_inside_it():
+    html_sanitize.sanitize_html(("<b><i>x</b>") * 500)  # each </b> also closes the dangling <i>
+
+
+def test_escaping_expansion_cannot_get_past_the_cap(monkeypatch):
+    monkeypatch.setattr(models, "MAX_HTML", 100)
+    sid = _series()
+    assert c.post(f"/api/series/{sid}/research", json={"data": {"title": "r", "body": "&" * 10}}).status_code == 200
+    r = c.post(f"/api/series/{sid}/research", json={"data": {"title": "r", "body": "&" * 30}})  # 30 in, 150 stored
+    assert r.status_code == 400 and "cleaned" in r.text
 
 
 # ------------------------------------------------------------ ceilings (F16)
@@ -337,3 +360,99 @@ def test_import_validates_before_it_takes_the_write_lock(monkeypatch):
     bundle = {"series": {"name": "Lock"}, "characters": [{"id": "a", "name": "x"}, {"id": "b", "name": "y"}]}
     assert c.post("/api/import", json=bundle).status_code == 200
     assert checked == ["characters", "characters"]
+
+
+# --------------------------------------- review follow-ups (races, legacy data)
+def test_a_record_that_already_has_a_dangling_link_can_still_be_saved():
+    """Only NEW links must resolve - old data from before this check may hold
+    dangling ones, and the user must still be able to fix a typo in it."""
+    sid = _series()
+    ch = _rec(sid, "characters", name="A")
+    loc = c.post(f"/api/series/{sid}/locations", json={"data": {"name": "L", "character_ids": [ch]}}).json()
+    with main.db(write=True) as con:  # simulate a legacy record pointing at something that isn't there
+        row = con.execute("SELECT data FROM records WHERE id=?", (loc["id"],)).fetchone()
+        import json as _json
+        d = _json.loads(row["data"]); d["character_ids"] = [ch, "long-gone"]
+        con.execute("UPDATE records SET data=?, version=version+1 WHERE id=?", (_json.dumps(d), loc["id"]))
+    cur = c.get(f"/api/series/{sid}/locations").json()[0]
+    fixed = c.put(f"/api/series/{sid}/locations/{loc['id']}",
+                  json={"data": {"name": "L (renamed)", "character_ids": [ch, "long-gone"]}, "version": cur["version"]})
+    assert fixed.status_code == 200, fixed.text
+    added = c.put(f"/api/series/{sid}/locations/{loc['id']}",
+                  json={"data": {"name": "L", "character_ids": [ch, "long-gone", "brand-new-ghost"]}, "version": fixed.json()["version"]})
+    assert added.status_code == 400
+
+
+def _assert_write_lock_held(con):
+    other = sqlite3.connect(main.DB_PATH, timeout=0.05)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            other.execute("BEGIN IMMEDIATE")
+    finally:
+        other.close()
+
+
+def test_the_reference_and_quota_checks_run_inside_the_write_lock(monkeypatch):
+    """A check followed by a write is only safe if nothing can write in
+    between. Each check asserts another connection cannot take the write lock
+    at that moment."""
+    seen = []
+    real_refs, real_quota = main.check_refs, main.check_series_quota
+
+    def refs(con, *a, **k):
+        _assert_write_lock_held(con); seen.append("refs")
+        return real_refs(con, *a, **k)
+
+    def quota(con, *a, **k):
+        _assert_write_lock_held(con); seen.append("quota")
+        return real_quota(con, *a, **k)
+
+    monkeypatch.setattr(main, "check_refs", refs)
+    monkeypatch.setattr(main, "check_series_quota", quota)
+    sid = _series()
+    ch = _rec(sid, "characters", name="A")
+    loc = c.post(f"/api/series/{sid}/locations", json={"data": {"name": "L", "character_ids": [ch]}}).json()
+    c.put(f"/api/series/{sid}/locations/{loc['id']}", json={"data": {"name": "L2", "character_ids": [ch]}, "version": loc["version"]})
+    c.post("/api/import", json={"series": {"name": "lock check"}})
+    assert seen.count("refs") >= 2 and seen.count("quota") == 2  # the series created here, and the import
+
+
+def test_the_record_quota_count_runs_inside_the_write_lock(monkeypatch):
+    real = main.check_refs
+    monkeypatch.setattr(main, "MAX_RECORDS_PER_SERIES", 5)
+    sid = _series()
+    seen = []
+    monkeypatch.setattr(main, "check_refs", lambda con, *a, **k: (_assert_write_lock_held(con), seen.append(1), real(con, *a, **k))[2])
+    _rec(sid, "characters", name="x")
+    assert seen == [1]  # the count and the ref check share one locked transaction
+
+
+def test_import_name_suffix_never_pushes_the_name_past_the_limit():
+    name = "N" * models.MAX_SHORT
+    first = c.post("/api/import", json={"series": {"name": name}}).json()
+    second = c.post("/api/import", json={"series": {"name": name}}).json()
+    assert len(second["name"]) <= models.MAX_SHORT and second["name"].endswith(" (imported)")
+    got = c.get(f"/api/series/{second['id']}/bundle").json()["series"]
+    assert c.put(f"/api/series/{second['id']}", json={"data": {"name": second["name"]}, "version": got["version"]}).status_code == 200
+    assert first["name"] == name
+
+
+def test_import_scrubs_overlong_and_junk_foreign_references_instead_of_failing():
+    bundle = {
+        "series": {"name": "Legacy refs"},
+        "characters": [{"id": "a", "name": "x"}],
+        "locations": [{"id": "l", "name": "L", "character_ids": ["a", "z" * 300, {"a": 1}, 7, None]}],
+        "events": [{"id": "e", "title": "E", "location_id": {"nested": "junk"}, "chapter_id": "y" * 300}],
+    }
+    r = c.post("/api/import", json=bundle)
+    assert r.status_code == 200, r.text
+    assert r.json()["dropped_references"] == 6  # 4 junk list entries + 2 bad scalars
+    got = c.get(f"/api/series/{r.json()['id']}/bundle").json()
+    assert len(got["locations"][0]["character_ids"]) == 1
+
+
+def test_import_error_names_the_record_that_failed():
+    bundle = {"series": {"name": "Names the culprit"}, "characters": [{"id": "ok", "name": "fine"}, {"id": "bad-one", "name": "y" * 5000}]}
+    r = c.post("/api/import", json=bundle)
+    assert r.status_code == 400
+    assert "characters record 'bad-one'" in r.text and "name" in r.text

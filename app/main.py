@@ -77,7 +77,7 @@ from . import auth
 from . import backup as backup_mod
 from . import github_feedback as feedback_mod
 from .migrations import migrate
-from .models import KIND_MODELS, MAX_ID, REF_FIELDS, SeriesIn
+from .models import KIND_MODELS, MAX_ID, MAX_SHORT, REF_FIELDS, SeriesIn
 
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
 # Swagger UI / ReDoc / openapi.json (#45) describe every route and are served
@@ -141,13 +141,21 @@ def init_db() -> None:
 
 
 @contextmanager
-def db():
+def db(write: bool = False):
+    """`write=True` takes SQLite's write lock immediately (BEGIN IMMEDIATE)
+    instead of at the first INSERT/UPDATE. Use it wherever a handler *checks*
+    something and then writes on the strength of the check (a quota, a
+    reference, a version): with Python's default lazy transactions those
+    reads run outside any transaction, so a concurrent write could slip in
+    between the check and the insert (#71)."""
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA busy_timeout = 5000")   # wait rather than fail when another save holds the write lock
     con.execute("PRAGMA synchronous = NORMAL")  # safe with WAL; avoids an fsync on every write
     try:
+        if write:
+            con.execute("BEGIN IMMEDIATE")
         yield con
         con.commit()
     finally:
@@ -199,7 +207,7 @@ def validate_record(kind: str, data: dict) -> dict:
 def check_series_quota(con, user: auth.CurrentUser) -> None:
     owned = con.execute("SELECT COUNT(*) FROM series WHERE owner_oid=?", (user.oid,)).fetchone()[0]
     if owned >= MAX_SERIES_PER_OWNER:
-        raise HTTPException(400, f"You already own {owned} series, the limit is {MAX_SERIES_PER_OWNER}")
+        raise HTTPException(400, f"Series limit reached ({owned} of {MAX_SERIES_PER_OWNER})")
 
 
 def iter_refs(kind: str, data: dict):
@@ -213,11 +221,14 @@ def iter_refs(kind: str, data: dict):
             yield field, v
 
 
-def check_refs(con, series_id: str, kind: str, data: dict) -> None:
+def check_refs(con, series_id: str, kind: str, data: dict, already: frozenset = frozenset()) -> None:
     """400 if a record points at an id that isn't a record of the right kind
     in THIS series (#71) - otherwise one series could reference another's ids,
-    and a typo would silently produce a dangling link."""
-    refs = list(iter_refs(kind, data))
+    and a typo would silently produce a dangling link. `already` is the
+    (field, id) pairs the stored record had before this edit: those are not
+    re-checked, or a record that arrived with a dangling link (from an older
+    import) could never be saved again - only *new* links must resolve."""
+    refs = [ref for ref in iter_refs(kind, data) if ref not in already]
     if not refs:
         return
     found: dict[str, str] = {}
@@ -244,10 +255,12 @@ def scrub_refs(kind: str, data: dict, valid: dict[str, set[str]]) -> int:
     for field, target in REF_FIELDS.get(kind, {}).items():
         v = data.get(field)
         if isinstance(v, list):
-            keep = [x for x in v if x in valid[target]]
+            # isinstance first: an unhashable item (a dict) in a hand-edited
+            # bundle must be dropped, not raise on the set lookup.
+            keep = [x for x in v if isinstance(x, str) and x in valid[target]]
             dropped += len(v) - len(keep)
             data[field] = keep
-        elif v and v not in valid[target]:
+        elif v and not (isinstance(v, str) and v in valid[target]):
             data[field] = ""
             dropped += 1
     return dropped
@@ -469,8 +482,8 @@ DEFAULT_CSP = "; ".join([
     # Inline styles: the pane builds markup with style="..." attributes and
     # Quill positions its tooltips with inline styles.
     "style-src 'self' 'unsafe-inline'",
-    # Research entries may embed external images (the sanitizer allows https and data: only).
-    "img-src 'self' data: blob: https:",
+    # Research entries may embed external images (the sanitizer allows http, https and data:).
+    "img-src 'self' data: blob: https: http:",
     "font-src 'self' data:",
     "connect-src 'self' https://login.microsoftonline.com https://appsforoffice.microsoft.com",
     "frame-src https://login.microsoftonline.com",
@@ -839,7 +852,7 @@ def create_series(body: Body, user: auth.CurrentUser = Depends(require_person)):
     sid = new_id()
     data = validate_series(clean(body.data))
     now = time.time()
-    with db() as con:
+    with db(write=True) as con:
         check_series_quota(con, user)
         con.execute(
             "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
@@ -926,7 +939,8 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
     if not name_was_given:
         sdata["name"] = "Imported"
     with db() as con:
-        check_series_quota(con, user)
+        # (The series quota is checked below, inside the write lock, where it
+        # can't race with another create.)
         # Only series this caller can see: comparing against everyone's
         # made the "(imported)" suffix reveal that somebody else has a
         # series with this name (#70).
@@ -939,7 +953,8 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
             ).fetchall()
         existing = {json.loads(r["data"]).get("name") for r in rows}
     if sdata["name"] in existing:
-        sdata["name"] += " (imported)"
+        suffix = " (imported)"
+        sdata["name"] = sdata["name"][: MAX_SHORT - len(suffix)] + suffix  # stay inside the name limit
     for k in KINDS:
         for rec in bundle_in.get(k, []):
             idmap[rec["id"]] = new_id()
@@ -958,8 +973,15 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
     dropped = 0
     for k in KINDS:
         for rec in bundle_in.get(k, []):
-            data = validate_record(k, remap(clean(rec)))
-            lost = scrub_refs(k, data, valid)
+            raw = remap(clean(rec))
+            # Scrub before validating: a dangling reference from old data can
+            # be an arbitrary (even over-long) foreign id, which would
+            # otherwise fail validation instead of simply being dropped.
+            lost = scrub_refs(k, raw, valid)
+            try:
+                data = validate_record(k, raw)
+            except HTTPException as e:
+                raise HTTPException(400, f"{k} record '{rec['id']}': {e.detail}")
             dropped += lost
             if k == "relationships" and lost:
                 dropped += 1  # a relationship missing an end is meaningless: skip it entirely
@@ -967,7 +989,8 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
             prepared.append((idmap[rec["id"]], k, data))
 
     now = time.time()
-    with db() as con:
+    with db(write=True) as con:
+        check_series_quota(con, user)  # again, now inside the write lock, so two imports can't both squeeze in
         con.execute(
             "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
             "VALUES (?,?,?,?,1,?,?)",
@@ -1066,7 +1089,7 @@ def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser 
     check_kind(kind)
     rid, now = new_id(), time.time()
     data = validate_record(kind, clean(body.data))
-    with db() as con:
+    with db(write=True) as con:
         require_access(con, user, series_id, "write")
         count = con.execute("SELECT COUNT(*) FROM records WHERE series_id=?", (series_id,)).fetchone()[0]
         if count >= MAX_RECORDS_PER_SERIES:
@@ -1085,19 +1108,19 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
     check_kind(kind)
     now = time.time()
     data = validate_record(kind, clean(body.data))
-    with db() as con:
+    with db(write=True) as con:
         require_access(con, user, series_id, "write")
         if body.version is None:
             raise HTTPException(428, "version is required")
         current = con.execute(
-            "SELECT version FROM records WHERE id=? AND series_id=? AND kind=?", (rid, series_id, kind)
+            "SELECT version, data FROM records WHERE id=? AND series_id=? AND kind=?", (rid, series_id, kind)
         ).fetchone()
         if current and current["version"] == body.version:
             # Only for an up-to-date edit: a stale one falls through to the
             # UPDATE below and gets the 409 conflict prompt (a deleted
             # character's cascade bumps the versions of what referenced it),
             # not a confusing 400 about a reference the user never touched.
-            check_refs(con, series_id, kind, data)
+            check_refs(con, series_id, kind, data, frozenset(iter_refs(kind, json.loads(current["data"]))))
         cur = con.execute(
             "UPDATE records SET data=?, updated=?, version=version+1, updated_by=? "
             "WHERE id=? AND series_id=? AND kind=? AND version=?",
