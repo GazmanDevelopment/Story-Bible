@@ -34,11 +34,12 @@ run.
 
 ## Monitoring
 
-`GET /api/health/backup` (unauthenticated, like `/api/health` - a
-monitoring tool won't have `STORYBIBLE_TOKEN` either) returns **200**
-`{"ok": true, "age_seconds": ...}` if the last successful backup is under
-36 hours old, **503** if it's older than that or one has never succeeded.
-See [MONITORING.md](MONITORING.md) for actually wiring an uptime checker
+`GET /api/health` (unauthenticated - a monitoring tool won't have
+`STORYBIBLE_TOKEN` either) includes `"backup_ok": true` if the last
+successful backup is under 36 hours old, and `false` if it's older than that
+or one has never succeeded. (This used to be a separate
+`/api/health/backup` route; it was folded in so `/api/health` is the only
+public API route, #68.) See [MONITORING.md](MONITORING.md) for actually wiring an uptime checker
 to this (and to `/api/health`) so a silently-broken backup job doesn't go
 unnoticed for months.
 

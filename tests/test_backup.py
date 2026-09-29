@@ -188,33 +188,33 @@ def test_scheduler_survives_a_broken_backup_hour(monkeypatch):
     assert asyncio.run(drive_briefly()) is True
 
 
-# --------------------------------------------------------------- /api/health/backup
-def test_health_backup_503_when_never_run(tmp_path, monkeypatch):
+# ------------------------------------------------- /api/health backup_ok (#68)
+def test_health_backup_not_ok_when_never_run(tmp_path, monkeypatch):
     monkeypatch.setenv("BACKUP_DIR", str(tmp_path))
-    r = c.get("/api/health/backup")
-    assert r.status_code == 503
-    assert r.json()["ok"] is False
+    r = c.get("/api/health")
+    # Never a 503 for this alone: Docker restarts on a non-200, and a fresh
+    # install has no backup for up to a day.
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["backup_ok"] is False
 
-def test_health_backup_200_after_a_fresh_backup(tmp_path, monkeypatch):
+def test_health_backup_ok_after_a_fresh_backup(tmp_path, monkeypatch):
     monkeypatch.setenv("BACKUP_DIR", str(tmp_path))
     backup.run_backup()
-    r = c.get("/api/health/backup")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["ok"] is True
-    assert body["age_seconds"] < 5
+    body = c.get("/api/health").json()
+    assert body["backup_ok"] is True
+    assert "age_seconds" not in body  # the age is no longer exposed unauthenticated
 
-def test_health_backup_503_when_stale(tmp_path, monkeypatch):
+def test_health_backup_not_ok_when_stale(tmp_path, monkeypatch):
     monkeypatch.setenv("BACKUP_DIR", str(tmp_path))
     backup.run_backup()
     stale = time.time() - 37 * 3600
     (tmp_path / ".last_success").write_text(str(stale))
+    body = c.get("/api/health").json()
+    assert body["backup_ok"] is False
+    assert body["ok"] is True
 
-    r = c.get("/api/health/backup")
-
-    assert r.status_code == 503
-    assert r.json()["error"] == "backup is stale"
-
-def test_health_backup_not_cached():
-    r = c.get("/api/health/backup")
-    assert r.headers.get("cache-control") == "no-store"
+def test_old_health_backup_route_is_gone():
+    """Folded into /api/health (#68) - a monitor still pointed at the old URL
+    should fail loudly (404), not quietly keep getting some other answer."""
+    assert c.get("/api/health/backup").status_code == 404
