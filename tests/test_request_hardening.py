@@ -7,6 +7,7 @@ import asyncio
 import os
 import re
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 if "STORYBIBLE_DB" not in os.environ:
@@ -192,22 +193,51 @@ def test_csp_can_be_overridden_or_turned_off(monkeypatch):
 
 
 # ---- the pane's own files have to keep working under the CSP we ship
+class _PageScan(HTMLParser):
+    """Collects every <script> (case-insensitively - HTMLParser lower-cases
+    tag and attribute names) and every inline on*= handler in a page."""
+
+    def __init__(self):
+        super().__init__()
+        self.scripts = []   # each script tag's src, or None for an inline one
+        self.handlers = []  # (tag, attribute) for every on*= attribute
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "script":
+            self.scripts.append(attrs.get("src"))
+        self.handlers += [(tag, name) for name in attrs if name.startswith("on")]
+
+
+def _scan(page):
+    scan = _PageScan()
+    scan.feed((STATIC / page).read_text(encoding="utf-8"))
+    return scan
+
+
 @pytest.mark.parametrize("page", ["index.html", "auth-dialog.html"])
 def test_pages_load_scripts_only_from_origins_the_csp_allows(page):
-    html = (STATIC / page).read_text(encoding="utf-8")
     script_src = next(d for d in main.DEFAULT_CSP.split("; ") if d.startswith("script-src"))
     allowed_hosts = re.findall(r"https://[\w.-]+", script_src)
-    for tag in re.findall(r"<script\b[^>]*>", html):
-        m = re.search(r'src="([^"]+)"', tag)
-        assert m, f"{page} has an inline <script> ({tag}) - the CSP would block it"
-        src = m.group(1)
+    scripts = _scan(page).scripts
+    assert scripts, f"{page}: found no <script> tags at all - is the scan broken?"
+    for src in scripts:
+        assert src, f"{page} has an inline <script> - the CSP would block it"
         assert not src.startswith("http") or any(src.startswith(h) for h in allowed_hosts), f"{page}: {src} not allowed by the CSP"
 
 
 @pytest.mark.parametrize("page", ["index.html", "auth-dialog.html"])
 def test_pages_have_no_inline_event_handlers(page):
-    html = (STATIC / page).read_text(encoding="utf-8")
-    assert not re.search(r"\son[a-z]+\s*=", html), f"{page} has an inline on*= handler, blocked by the CSP"
+    assert not _scan(page).handlers, f"{page} has inline on*= handlers, blocked by the CSP"
+
+
+def test_the_page_scan_catches_uppercase_and_inline_cases():
+    """The scanner itself must not have the blind spot CodeQL flagged in the
+    regex it replaced (upper-case <SCRIPT>)."""
+    scan = _PageScan()
+    scan.feed('<SCRIPT>alert(1)</SCRIPT><Script SRC="https://evil.example/x.js"></Script><img ONERROR="x()" src=a>')
+    assert scan.scripts == [None, "https://evil.example/x.js"]
+    assert scan.handlers == [("img", "onerror")]
 
 
 def test_the_auth_dialog_script_is_served():
