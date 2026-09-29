@@ -610,3 +610,29 @@ def test_leaving_a_form_looks_for_other_peoples_changes(server, browser_page):
     pg.click("[data-act=cancel]")
     pg.wait_for_selector("text=Added While You Were Editing")
     assert not errors, errors
+
+
+# ------------------------------------------------------------------ #73
+def test_feedback_form_warns_that_it_is_posted_publicly(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    pg.click("[data-act=log-issue]")
+    pg.wait_for_selector("form[data-kind=feedback]")
+    notice = pg.inner_text("[data-role=public-notice]")
+    assert "public GitHub issue" in notice and "anyone can read it" in notice
+    assert "story text" in notice
+    assert "display name" not in notice     # no real identity outside Entra mode: nothing is added
+    assert pg.is_visible("[data-role=public-notice]")
+    assert not errors, errors
+
+
+def test_feedback_notice_mentions_the_display_name_in_entra_mode(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    html = pg.evaluate("""() => { S.config = { ...S.config, authMode: "entra" }; return feedbackForm("suggestion"); }""")
+    assert "public GitHub issue" in html and "Your display name is added to it." in html
+    assert not errors, errors
