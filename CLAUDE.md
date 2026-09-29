@@ -26,8 +26,7 @@ test for the new behaviour in isolation:
 
 **Code review.** Before pushing a change (or opening/updating a PR), run the
 `code-review` skill against the diff and address what it finds before it goes
-up. Use `/code-review ultra` for anything touching auth, permissions, or
-deployment/secrets handling.
+up.
 
 **Everything goes through a PR**, even for the repo owner - see the branch
 protection notes in issue #19. Work on a feature branch, push it, open a PR,
