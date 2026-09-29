@@ -40,6 +40,7 @@ def test_health():
     r = c.get("/api/health")
     assert r.status_code == 200
     body = r.json()
+    assert isinstance(body.pop("backup_ok"), bool)  # depends on whether a backup has run (#68)
     assert body == {"ok": True, "auth": False, "version": __version__}
 
 def test_pragmas():

@@ -9,6 +9,8 @@ are handled by app/migrations.py and applied automatically on startup.
 Env vars:
   STORYBIBLE_DB     path to the SQLite file   (default /data/storybible.db)
   MAX_BODY_BYTES    request body size cap, in bytes (default 5 MiB)
+  ENABLE_API_DOCS   serve /docs, /redoc and /openapi.json, unauthenticated
+                    (default off - see API_DOCS_ENABLED, #68)
   IMPORT_MAX_BODY_BYTES  body size cap for /api/import specifically, in
                     bytes (default 20 MiB) - a whole-series bundle in one
                     request, unlike every other route's single record, and
@@ -51,6 +53,7 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
@@ -70,6 +73,10 @@ from .migrations import migrate
 from .models import KIND_MODELS, SeriesIn
 
 DB_PATH = os.environ.get("STORYBIBLE_DB", "/data/storybible.db")
+# Swagger UI / ReDoc / openapi.json (#45) describe every route and are served
+# without auth, which the only-health-is-public rule (#44/#68) doesn't allow -
+# so they're off unless explicitly switched on (e.g. for local development).
+API_DOCS_ENABLED = os.environ.get("ENABLE_API_DOCS", "").strip().lower() in ("1", "true", "yes", "on")
 MAX_BODY_BYTES = int(os.environ.get("MAX_BODY_BYTES", 5 * 1024 * 1024))
 IMPORT_MAX_BODY_BYTES = int(os.environ.get("IMPORT_MAX_BODY_BYTES", 20 * 1024 * 1024))
 STATIC_DIR = Path(__file__).parent / "static"
@@ -203,6 +210,33 @@ def _data_dir_writable(data_dir: Path) -> bool:
         return False
 
 
+_DIR_PROBE_TTL_SECONDS = 5
+_dir_probe_cache: dict[str, float] = {}  # data dir -> monotonic time of last successful probe
+_dir_probe_lock = threading.Lock()
+
+
+def _data_dir_writable_cached(data_dir: Path) -> bool:
+    """/api/health is unauthenticated, and the probe above creates and
+    deletes a file - so anyone who can reach the port could otherwise make
+    the server do disk writes as fast as they can send requests (#68).
+    Docker polls every 30 s, so a few seconds of caching costs monitoring
+    nothing."""
+    key = str(data_dir)
+    with _dir_probe_lock:  # concurrent requests at expiry must not each probe
+        hit = _dir_probe_cache.get(key)
+        if hit and time.monotonic() - hit < _DIR_PROBE_TTL_SECONDS:
+            return True
+        ok = _data_dir_writable(data_dir)
+        if ok:
+            # Only successes are cached: a failure is reported the moment
+            # the directory recovers, and one transient I/O error can't
+            # keep /api/health at 503 for the whole TTL.
+            _dir_probe_cache[key] = time.monotonic()
+        else:
+            _dir_probe_cache.pop(key, None)
+        return ok
+
+
 def _sanitize_for_log(s: str) -> str:
     """A request path is attacker-controlled and logged verbatim elsewhere
     in this file - without this, a percent-encoded newline (`%0A`) in a URL
@@ -233,7 +267,7 @@ def get_current_user(
     authorization: str | None = Header(default=None),
     x_token: str | None = Header(default=None),
 ) -> auth.CurrentUser:
-    """The one auth dependency every /api/* route (other than /api/health*
+    """The one auth dependency every /api/* route (other than /api/health
     and /api/config) takes. Behaviour depends entirely on AUTH_MODE, so
     every existing none/token deployment (and every test written before
     #10 landed) keeps working unchanged - only AUTH_MODE=entra does real
@@ -343,9 +377,12 @@ app = FastAPI(
     version=__version__,
     description="Backend for the Story Bible Word task-pane add-in - characters, places, "
         "relationships and a timeline for a per-series story bible. See PLAN.md in the repo "
-        "for the full data model and the AUTH_MODE options used by `Authorize` above.",
+        "for the full data model and the AUTH_MODE options (send X-Token or a bearer token).",
     openapi_tags=TAGS_METADATA,
     lifespan=lifespan,
+    docs_url="/docs" if API_DOCS_ENABLED else None,
+    redoc_url="/redoc" if API_DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if API_DOCS_ENABLED else None,
 )
 init_db()
 
@@ -504,44 +541,46 @@ def people_map(con, *records: dict[str, Any]) -> dict[str, str]:
 
 
 # ---- health
+MAX_BACKUP_AGE_SECONDS = 36 * 3600
+
+
+def _backup_ok() -> bool:
+    """True if the last successful backup is under MAX_BACKUP_AGE_SECONDS
+    old. A bare boolean - the exact age used to be its own unauthenticated
+    route (/api/health/backup), which #68 folded in here so the only public
+    API route is /api/health (plus /api/config, which the pane needs before
+    it can sign in)."""
+    age = backup_mod.last_backup_age_seconds()
+    # 0 <= : a marker in the future (clock stepped back, volume restored from
+    # a skewed host) must not read as "fresh" and silence the alert.
+    return age is not None and 0 <= age <= MAX_BACKUP_AGE_SECONDS
+
+
 class HealthResponse(BaseModel):
     ok: bool
     auth: bool
     version: str
+    backup_ok: bool
 
 
 @app.get("/api/health", tags=["health"], response_model=HealthResponse,
-         responses={503: {"description": "Database unreachable, or the data directory isn't writable"}})
+         responses={503: {"description": "Database unreachable, or the data directory isn't writable"}},
+         description="Unauthenticated. `ok` and the status code reflect only the database and data "
+                     "directory; `backup_ok` is false if no backup has succeeded in the last 36 hours.")
 def health():
-    body: dict[str, Any] = {"ok": True, "auth": auth.AUTH_MODE != "none", "version": __version__}
+    # backup_ok deliberately does NOT feed into `ok`/the status code: Docker's
+    # HEALTHCHECK restarts on a non-200, and a fresh install has no backup
+    # yet for up to a day. Monitoring alerts on backup_ok=false separately
+    # (docs/MONITORING.md).
+    body: dict[str, Any] = {"ok": True, "auth": auth.AUTH_MODE != "none", "version": __version__,
+                            "backup_ok": _backup_ok()}
     if not _db_ok():
         body.update(ok=False, error="database unavailable")
         return JSONResponse(body, status_code=503)
-    if not _data_dir_writable(Path(DB_PATH).parent):
+    if not _data_dir_writable_cached(Path(DB_PATH).parent):
         body.update(ok=False, error="data directory not writable")
         return JSONResponse(body, status_code=503)
     return body
-
-
-MAX_BACKUP_AGE_SECONDS = 36 * 3600
-
-
-class HealthBackupResponse(BaseModel):
-    ok: bool
-    age_seconds: float
-
-
-@app.get("/api/health/backup", tags=["health"], response_model=HealthBackupResponse,
-         responses={503: {"description": "No successful backup yet, or the most recent one is stale"}})
-def health_backup():
-    """For monitoring (#17), not the pane - unauthenticated like /api/health,
-    since a monitoring tool won't have STORYBIBLE_TOKEN either."""
-    age = backup_mod.last_backup_age_seconds()
-    if age is None:
-        return JSONResponse({"ok": False, "error": "no successful backup yet"}, status_code=503)
-    if age > MAX_BACKUP_AGE_SECONDS:
-        return JSONResponse({"ok": False, "age_seconds": age, "error": "backup is stale"}, status_code=503)
-    return {"ok": True, "age_seconds": age}
 
 
 # ---- auth (#10)

@@ -161,7 +161,6 @@ def test_none_and_token_modes_still_work_exactly_as_before():
 
 def test_health_endpoints_stay_unauthenticated_even_in_entra_mode(entra_mode):
     """#17: an uptime checker has no bearer token (or X-Token) to send -
-    these two routes must never gain an auth dependency, in any AUTH_MODE,
-    or external monitoring breaks silently."""
+    this route must never gain an auth dependency, in any AUTH_MODE, or
+    external monitoring breaks silently."""
     assert c.get("/api/health").status_code in (200, 503)
-    assert c.get("/api/health/backup").status_code in (200, 503)

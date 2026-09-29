@@ -87,7 +87,8 @@ see `docs/BACKUP.md`'s "TrueNAS: snapshot the dataset too" section.
 
 ## Monitoring
 
-Point an uptime checker at `/api/health` and `/api/health/backup` (#17),
+Point an uptime checker at `/api/health` - its status code for the server,
+its `backup_ok` field for backups (#17, #68),
 and confirm TrueNAS alerting is actually wired to a notification service
 so a failed snapshot task above doesn't go unnoticed either - see
 `docs/MONITORING.md` for the exact setup.

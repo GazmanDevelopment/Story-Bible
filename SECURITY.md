@@ -33,6 +33,21 @@ Bugs in this repository's code: authentication/authorization bypass, data
 leakage between series or between users once multi-user sharing lands (see
 `PLAN.md` §3), injection, and similar issues in `app/` or the task pane.
 
+## What is reachable without signing in
+
+Deliberately short, and enforced by `tests/test_public_surface.py` (a new
+route that isn't on its allow-list fails the build unless it requires auth):
+
+- `GET /api/health` - liveness for Docker/monitoring: `ok`, `auth` (whether
+  auth is on), the version, and a `backup_ok` boolean.
+- `GET /api/config` - the Entra tenant and client ids the task pane needs
+  before it can sign in. Both are public values (they're in the manifest).
+- `GET /` and the static task-pane files - the UI shell, no data.
+
+The Swagger UI / ReDoc / `openapi.json` pages are **off by default**; setting
+`ENABLE_API_DOCS=true` serves them without authentication, so only do that
+on a machine you control.
+
 ## What's already a known, accepted trade-off
 
 A few things are deliberate design decisions written up in `PLAN.md`'s risk

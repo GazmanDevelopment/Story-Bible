@@ -31,7 +31,7 @@ Note on this module's style: unlike app/main.py's DB_PATH/TOKEN/etc (read
 once at import time), the settings here are read fresh on every call rather
 than cached as module constants. That's deliberate: it avoids this module
 needing to import app.main at the top level (app.main will import *this*
-module, to wire up the scheduler and /api/health/backup - reading env vars
+module, to wire up the scheduler and /api/health's backup_ok - reading env vars
 lazily, inside functions, sidesteps the circular import instead of needing
 either side to special-case it), and it makes tests able to just
 monkeypatch an environment variable rather than reach into module state.

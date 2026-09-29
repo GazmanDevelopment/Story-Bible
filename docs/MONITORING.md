@@ -1,27 +1,41 @@
 # Monitoring (#17)
 
 Two things need to alert on their own, without anyone having to remember to
-check: the server going down, and backups silently stopping. Both have a
-dedicated, unauthenticated health endpoint for exactly this - point an
-uptime checker at them rather than inferring health from application logs.
+check: the server going down, and backups silently stopping. Both are
+reported by one unauthenticated endpoint, `/api/health` - point an uptime
+checker at it rather than inferring health from application logs. (Backup
+freshness used to be a separate `/api/health/backup` route; it was folded
+in so `/api/health` is the only public API route - #68. A monitor still
+pointed at the old URL now gets a 404, which is your cue to update it.)
 
 ## What to monitor
 
-| Check | URL | Healthy | Unhealthy |
-|---|---|---|---|
-| Server up | `https://storybible.huscroft.com.au/api/health` | `200` | `503` - database unreachable or `/data` not writable |
-| Backup freshness | `https://storybible.huscroft.com.au/api/health/backup` | `200` | `503` - no successful backup yet, or the last one is over 36h old |
+`https://storybible.huscroft.com.au/api/health` returns, for example:
 
-Both:
-- Take **no authentication** - a monitoring tool has no `STORYBIBLE_TOKEN`/
-  Entra token, so these two routes are deliberately exempt (see
-  `app/main.py`). Nothing they return is sensitive: a bare `ok`/`error`
-  and, for `/api/health`, the running version.
-- Are **never cached** (`Cache-Control: no-store`) - a stale cached `200`
-  from a proxy in between would defeat the whole point.
-- Return a real HTTP status code (`200`/`503`), not just `"ok": false` in
-  a `200` body - so a plain "is this URL up" check (not just a keyword
-  monitor) already works.
+```json
+{"ok":true,"auth":true,"version":"0.1.0","backup_ok":true}
+```
+
+| Check | How | Healthy | Unhealthy |
+|---|---|---|---|
+| Server up | HTTP status of `/api/health` | `200` | `503` - database unreachable or `/data` not writable |
+| Backup freshness | the `backup_ok` field in the same response | `"backup_ok": true` | `"backup_ok": false` - no successful backup yet, or the last one is over 36h old |
+
+`backup_ok` deliberately does **not** change the HTTP status: Docker's
+built-in healthcheck restarts the container on any non-200, and a brand-new
+install has no backup for up to a day. So the backup check has to look at
+the response body (a keyword monitor), not just the status code.
+
+The endpoint:
+- Takes **no authentication** - a monitoring tool has no `STORYBIBLE_TOKEN`/
+  Entra token, so this route is deliberately exempt (see `app/main.py`).
+  Nothing it returns is sensitive: `ok`, `auth`, the running version and
+  the `backup_ok` boolean (the exact backup age is no longer exposed).
+- Is **never cached** by clients or proxies (`Cache-Control: no-store`) - a
+  stale cached `200` from a proxy in between would defeat the whole point.
+  (The server itself re-probes the data directory at most every 5 seconds.)
+- Returns a real HTTP status code (`200`/`503`) for the server check, not
+  just `"ok": false` in a `200` body.
 
 The 36-hour backup threshold (`MAX_BACKUP_AGE_SECONDS` in `app/main.py`)
 gives a full extra day of slack over the once-daily backup schedule before
@@ -35,20 +49,24 @@ instance running somewhere (Apps → Discover Apps → search "Uptime Kuma") -
 give it its own small dataset for `/app/data`, same pattern as this app's
 own dataset.
 
-For each of the two URLs above, add a monitor:
+Add two monitors against the same URL, `https://storybible.huscroft.com.au/api/health`:
 
-1. **Add New Monitor** → Monitor Type: **HTTP(s) - Status code** (not
-   "keyword" - the status code alone is the whole signal here).
-2. **Friendly Name**: `Story Bible - server` / `Story Bible - backup freshness`.
-3. **URL**: from the table above.
-4. **Heartbeat Interval**: 60s for the server check is plenty; the backup
-   check only needs to catch drift over hours, so every 5-10 minutes is
-   fine and cuts log noise.
-5. **Retries**: set to 2-3 with a short **Heartbeat Retry Interval** (e.g.
+1. **Server**: Monitor Type **HTTP(s) - Status code**, Friendly Name
+   `Story Bible - server`. Heartbeat Interval 60s is plenty.
+2. **Backup freshness**: Monitor Type **HTTP(s) - Keyword**, Friendly Name
+   `Story Bible - backup freshness`, Keyword `"backup_ok":true` (exactly
+   that - the response is compact JSON, no spaces; Kuma alerts when it is
+   *missing*). The
+   backup check only needs to catch drift over hours, so a 5-10 minute
+   interval is fine and cuts log noise.
+
+For both:
+
+3. **Retries**: set to 2-3 with a short **Heartbeat Retry Interval** (e.g.
    20s) before Kuma actually fires a notification - a single dropped
    request over a flaky LAN link shouldn't page anyone; two or three
    consecutive failures should.
-6. **Notifications**: attach a notification method (below) to both
+4. **Notifications**: attach a notification method (below) to both
    monitors before saving.
 
 ### Notifications
