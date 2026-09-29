@@ -273,6 +273,9 @@ def test_only_the_configured_legacy_owner_claims_ownerless_series(monkeypatch):
 
 
 def test_legacy_owner_also_claims_series_that_appear_after_their_first_sign_in(monkeypatch):
+    # The claim runs whenever the person's users row is refreshed - at most
+    # every LAST_SEEN_REFRESH_SECONDS since #72; 0 = on every request here.
+    monkeypatch.setattr(main, "LAST_SEEN_REFRESH_SECONDS", 0)
     monkeypatch.setattr(auth, "LEGACY_OWNER_OID", "the-real-owner-2")
     c.get("/api/me", headers=_as("the-real-owner-2"))
     _insert_legacy("legacy3")

@@ -66,11 +66,12 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import __version__
 from . import auth
@@ -346,6 +347,18 @@ def upsert_user(con: sqlite3.Connection, user: auth.CurrentUser) -> bool:
     return True
 
 
+# How often a signed-in person's `users` row is rewritten (#72). It used to be
+# on every request, which took SQLite's single write lock (and a second
+# connection) for what is really a read - the pane makes several calls per
+# click. last_seen is only "roughly when", so minutes-old is fine.
+LAST_SEEN_REFRESH_SECONDS = 300
+# (DB path, oid) -> (email, display name, monotonic time of the last write).
+# Per process, which is right for this app's single worker; a second worker
+# would just do one extra write. Keyed by DB path so a test or a restore that
+# swaps the database can't be fooled by an entry for the old one.
+_seen_users: dict[tuple[str, str], tuple[str, str, float]] = {}
+
+
 def get_current_user(
     authorization: str | None = Header(default=None),
     x_token: str | None = Header(default=None),
@@ -373,14 +386,10 @@ def get_current_user(
     except auth.AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     if not user.is_pipeline:
-        # A second connection beyond the one the route handler itself opens
-        # right after - each `with db() as con:` block is already its own
-        # connection throughout this file (no pooling), so this doubles
-        # SQLite connection setup for every entra-mode request. Not worth
-        # threading a shared, request-scoped connection through every route
-        # to save on local-file connect() calls this app's actual scale
-        # (a single writer, PLAN.md) makes negligible - see #12's PR
-        # discussion if usage ever grows enough to matter.
+        key, now = (DB_PATH, user.oid), time.monotonic()
+        seen = _seen_users.get(key)
+        if seen and seen[:2] == (user.email, user.display_name) and now - seen[2] < LAST_SEEN_REFRESH_SECONDS:
+            return user  # already recorded a moment ago: no connection, no write
         with db() as con:
             upsert_user(con, user)
             if (auth.LEGACY_OWNER_OID and user.oid == auth.LEGACY_OWNER_OID
@@ -392,6 +401,7 @@ def get_current_user(
                 # The SELECT keeps this a read (no write lock) once
                 # everything has been claimed.
                 con.execute("UPDATE series SET owner_oid=? WHERE owner_oid=''", (user.oid,))
+        _seen_users[key] = (user.email, user.display_name, now)
     return user
 
 
@@ -608,6 +618,10 @@ class HardeningMiddleware:
             logger.info("%s %s %s %.1fms", scope["method"], _sanitize_for_log(path), status, elapsed_ms)
 
 
+# Compress responses over 1 KB when the client accepts gzip (#72): a large
+# bundle is JSON and shrinks ~85x, which is most of the transfer time over a
+# VPN or the reverse proxy. Added first so it sits inside HardeningMiddleware.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(HardeningMiddleware)
 
 
@@ -699,6 +713,17 @@ def require_access(con, user: auth.CurrentUser, series_id: str, need: str) -> sq
     if need == "owner" and role == "owner":
         return row
     raise HTTPException(403, "Not allowed")
+
+
+def accessible_series_rows(con, user: auth.CurrentUser, columns: str = "*") -> list[sqlite3.Row]:
+    """The series this caller can see, filtered by SQLite rather than by
+    loading every series' JSON into Python and discarding most of it (#72)."""
+    if auth.AUTH_MODE != "entra" or user.is_pipeline:
+        return con.execute(f"SELECT {columns} FROM series").fetchall()
+    return con.execute(
+        f"SELECT {columns} FROM series WHERE owner_oid=? OR id IN (SELECT series_id FROM members WHERE oid=?)",
+        (user.oid, user.oid),
+    ).fetchall()
 
 
 def accessible_series_ids(con, user: auth.CurrentUser) -> set[str] | None:
@@ -838,13 +863,22 @@ def list_users(user: auth.CurrentUser = Depends(require_person)):
 
 # ---- series
 @app.get("/api/series", tags=["series"])
-def list_series(user: auth.CurrentUser = Depends(get_current_user)):
+def list_series(summary: bool = False, user: auth.CurrentUser = Depends(get_current_user)):
+    """`?summary=true` returns just id/name/version/owner - what a series
+    picker needs - instead of every series' full settings (a series
+    description can be 200,000 characters, and this is called after every
+    series change; #72). The default is unchanged for other API callers."""
     with db() as con:
-        ids = accessible_series_ids(con, user)
-        rows = con.execute("SELECT * FROM series").fetchall()
-    if ids is not None:
-        rows = [r for r in rows if r["id"] in ids]
-    return sorted((row_to_obj(r) for r in rows), key=lambda s: s.get("name", "").lower())
+        if summary:
+            rows = accessible_series_rows(
+                con, user,
+                "id, json_extract(data, '$.name') AS name, updated, version, owner_oid, created_by, updated_by")
+            out = [{"id": r["id"], "name": r["name"] or "", "updated": r["updated"], "version": r["version"],
+                    "owner_oid": r["owner_oid"], "created_by": r["created_by"], "updated_by": r["updated_by"]}
+                   for r in rows]
+        else:
+            out = [row_to_obj(r) for r in accessible_series_rows(con, user)]
+    return sorted(out, key=lambda s: (s.get("name") or "").lower())
 
 
 @app.post("/api/series", tags=["series"])
@@ -893,18 +927,58 @@ def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_u
     return {"deleted": series_id}
 
 
-@app.get("/api/series/{series_id}/bundle", tags=["series"])
-def bundle(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
-    """Everything for one series in a single call (also used as the export)."""
+def bundle_etag(con, series_row: sqlite3.Row) -> str:
+    """A cheap validator for GET /bundle (#72): the series' version and owner
+    plus every record's (id, version), and the users table (display names
+    appear in the bundle's `people` map). Every write bumps a version, so
+    anything that would change the bundle changes this; nothing here parses a
+    record's JSON. Weak (`W/`): the body also carries an `exported` timestamp,
+    so it is equivalent, not byte-identical, between responses."""
+    h = hashlib.blake2b(digest_size=16)
+    h.update(f"{__version__}|{series_row['id']}|{series_row['version']}|{series_row['owner_oid']}".encode())
+    for r in con.execute("SELECT id, version FROM records WHERE series_id=? ORDER BY id", (series_row["id"],)):
+        h.update(f"|{r['id']}:{r['version']}".encode())
+    for r in con.execute("SELECT oid, display_name FROM users ORDER BY oid"):
+        h.update(f"|{r['oid']}={r['display_name']}".encode())
+    return f'W/"{h.hexdigest()}"'
+
+
+def build_bundle(con, series_row: sqlite3.Row) -> dict[str, Any]:
+    s = row_to_obj(series_row)
+    rows = con.execute("SELECT * FROM records WHERE series_id=?", (series_row["id"],)).fetchall()
+    by_kind: dict[str, list[dict[str, Any]]] = {k: [] for k in KINDS}
+    for r in rows:
+        by_kind[r["kind"]].append(row_to_obj(r))
+    all_recs = [rec for recs in by_kind.values() for rec in recs]
+    return {"series": s, "exported": time.time(), "people": people_map(con, s, *all_recs), **by_kind}
+
+
+def export_bundle(series_id: str, user: auth.CurrentUser) -> dict[str, Any]:
+    """The bundle as a plain dict, for in-process callers (the nightly backup)."""
     with db() as con:
-        s = row_to_obj(require_access(con, user, series_id, "read"))
-        rows = con.execute("SELECT * FROM records WHERE series_id=?", (series_id,)).fetchall()
-        by_kind: dict[str, list[dict[str, Any]]] = {k: [] for k in KINDS}
-        for r in rows:
-            by_kind[r["kind"]].append(row_to_obj(r))
-        all_recs = [rec for recs in by_kind.values() for rec in recs]
-        people = people_map(con, s, *all_recs)
-    return {"series": s, "exported": time.time(), "people": people, **by_kind}
+        return build_bundle(con, require_access(con, user, series_id, "read"))
+
+
+def _etag_matches(header: str | None, etag: str) -> bool:
+    if not header:
+        return False
+    bare = etag.removeprefix("W/")
+    return any(t.strip().removeprefix("W/") == bare for t in header.split(","))
+
+
+@app.get("/api/series/{series_id}/bundle", tags=["series"],
+         responses={304: {"description": "Unchanged since the ETag in If-None-Match"}})
+def bundle(series_id: str, request: Request, user: auth.CurrentUser = Depends(get_current_user)):
+    """Everything for one series in a single call (also used as the export).
+    Sends an ETag; a client that repeats it in If-None-Match gets a bodyless
+    304 when nothing in the series has changed (#72)."""
+    with db() as con:
+        row = require_access(con, user, series_id, "read")
+        etag = bundle_etag(con, row)
+        if _etag_matches(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers={"ETag": etag})
+        data = build_bundle(con, row)
+    return JSONResponse(data, headers={"ETag": etag})
 
 
 @app.post("/api/import", tags=["series"])

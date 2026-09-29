@@ -120,7 +120,7 @@ def _export_json(json_root: Path) -> Path:
     # of the whole database must (#10/#11 are about API callers, not this).
     for s in app_main.list_series(user=auth.SYSTEM_USER):
         try:
-            data = app_main.bundle(s["id"], user=auth.SYSTEM_USER)
+            data = app_main.export_bundle(s["id"], auth.SYSTEM_USER)
         except HTTPException:
             # Deleted between list_series() and here. Not run_backup()'s
             # problem to fail over - skip it rather than losing the whole
