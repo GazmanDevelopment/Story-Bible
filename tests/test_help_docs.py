@@ -60,7 +60,7 @@ def test_images_have_alt_text():
 def test_guide_sections_present():
     ids = _scan(DOCS / "help" / "index.html").ids
     for sec in ("getting-started", "series", "timeline", "relationship-types",
-                "adding", "linking", "research", "backup", "feedback", "privacy"):
+                "adding", "linking", "research", "backup", "feedback", "privacy", "delete-account"):
         assert sec in ids
 
 

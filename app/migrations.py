@@ -120,6 +120,18 @@ def _v7_users_tid(con: sqlite3.Connection) -> None:
     con.execute("ALTER TABLE users ADD COLUMN tid TEXT NOT NULL DEFAULT ''")
 
 
+def _v8_deleted_users(con: sqlite3.Connection) -> None:
+    """#86: a tombstone for each account deleted at its owner's request - the
+    oid and when, nothing else. Lets a restore from backup re-apply deletions
+    made since the backup was taken (docs/RESTORE.md). No foreign key to users,
+    for the same reason as blocked_users."""
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS deleted_users (
+               oid TEXT PRIMARY KEY,
+               deleted_at REAL NOT NULL)"""
+    )
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
@@ -129,6 +141,7 @@ MIGRATIONS: list[Migration] = [
     _v5_access_indexes,
     _v6_blocked_users,
     _v7_users_tid,
+    _v8_deleted_users,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

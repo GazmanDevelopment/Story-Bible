@@ -877,7 +877,11 @@ def accessible_series_rows(con, user: auth.CurrentUser, columns: str = "*") -> l
 # ------------------------------------------------------- concurrency (#12)
 # The two non-entra identities don't get a `users` row (see app/auth.py) -
 # resolved here instead of on every request in the common no-auth case.
-_SYNTHETIC_DISPLAY_NAMES = {auth.LOCAL_USER.oid: auth.LOCAL_USER.display_name, auth.SHARED_USER.oid: auth.SHARED_USER.display_name}
+# #86: created_by/updated_by on other people's rows are rewritten to this when
+# their author deletes their account.
+DELETED_USER_OID = "deleted-user"
+_SYNTHETIC_DISPLAY_NAMES = {auth.LOCAL_USER.oid: auth.LOCAL_USER.display_name, auth.SHARED_USER.oid: auth.SHARED_USER.display_name,
+                            DELETED_USER_OID: "Deleted user"}
 
 
 def display_name_for(con, oid: str) -> str:
@@ -998,6 +1002,79 @@ class MeOut(BaseModel):
 def get_me(user: auth.CurrentUser = Depends(get_current_user)):
     return {"oid": user.oid, "email": user.email, "displayName": user.display_name,
             "isPipeline": user.is_pipeline, "isAdmin": is_admin(user)}
+
+
+def delete_account_data(con: sqlite3.Connection, oid: str) -> dict[str, int]:
+    """Erase everything held about `oid` (#86), inside the caller's write
+    transaction: their users row, every series they own (records and member
+    rows too), their memberships in other people's series, and their name on
+    other people's rows (replaced by DELETED_USER_OID). Leaves blocked_users
+    alone so deleting is no way round a block, and records a tombstone (oid +
+    time only) so a restore from backup can re-apply the deletion. Also used
+    by scripts/apply_tombstones.py."""
+    owned = [r[0] for r in con.execute("SELECT id FROM series WHERE owner_oid=?", (oid,))]
+    shared_with = 0
+    for sid in owned:
+        shared_with += con.execute("SELECT COUNT(*) FROM members WHERE series_id=?", (sid,)).fetchone()[0]
+        con.execute("DELETE FROM members WHERE series_id=?", (sid,))
+        con.execute("DELETE FROM records WHERE series_id=?", (sid,))
+        con.execute("DELETE FROM series WHERE id=?", (sid,))
+    left = con.execute("DELETE FROM members WHERE oid=?", (oid,)).rowcount
+    for table in ("series", "records"):
+        for col in ("created_by", "updated_by"):
+            con.execute(f"UPDATE {table} SET {col}=? WHERE {col}=?", (DELETED_USER_OID, oid))
+    con.execute("DELETE FROM users WHERE oid=?", (oid,))
+    con.execute("INSERT OR REPLACE INTO deleted_users (oid, deleted_at) VALUES (?,?)", (oid, time.time()))
+    return {"series_deleted": len(owned), "shared_with": shared_with, "memberships_left": left}
+
+
+class DeleteAccountBody(BaseModel):
+    confirm: str = Field("", max_length=320)
+
+
+class AccountDeletedOut(BaseModel):
+    deleted: bool
+    series_deleted: int
+    shared_with: int
+    memberships_left: int
+
+
+@app.delete("/api/me", tags=["auth"], response_model=AccountDeletedOut, dependencies=WRITE_LIMIT)
+def delete_me(body: DeleteAccountBody, user: auth.CurrentUser = Depends(require_person)):
+    """Right to erasure (#86): delete the caller's account and data - see
+    delete_account_data for exactly what goes. `confirm` must be the
+    caller's email (or the word DELETE) so a stray call can't wipe an
+    account. Only meaningful with real accounts: in none/token mode there is
+    one shared bible, which this must never wipe."""
+    if auth.AUTH_MODE != "entra":
+        raise HTTPException(400, "Accounts are only used when the server requires sign-in")
+    typed = body.confirm.strip().lower()
+    if not typed or typed not in {"delete", user.email.strip().lower()} - {""}:
+        raise HTTPException(400, "Type your email address to confirm")
+    with db(write=True) as con:
+        result = delete_account_data(con, user.oid)
+    global _block_epoch
+    _block_epoch += 1
+    _seen_users.pop((DB_PATH, user.oid), None)
+    logger.info("user %s deleted their account", _sanitize_for_log(user.oid))
+    return {"deleted": True, **result}
+
+
+@app.get("/api/me/export", tags=["auth"])
+def export_me(user: auth.CurrentUser = Depends(require_person)):
+    """Download my data (#86, #100): the caller's account record, their
+    memberships in other people's series, and every series they own in the
+    usual bundle format."""
+    with db() as con:
+        u = con.execute("SELECT oid, email, display_name, tid, first_seen, last_seen FROM users WHERE oid=?",
+                        (user.oid,)).fetchone()
+        memberships = [dict(r) for r in con.execute(
+            "SELECT series_id, role FROM members WHERE oid=? ORDER BY series_id", (user.oid,))]
+        series = [build_bundle(con, r) for r in con.execute(
+            "SELECT * FROM series WHERE owner_oid=? ORDER BY id", (user.oid,))]
+    return JSONResponse({"exported": time.time(), "account": dict(u) if u else {"oid": user.oid},
+                         "memberships": memberships, "series": series},
+                        headers={"Content-Disposition": 'attachment; filename="storybible-my-data.json"'})
 
 
 class UserOut(BaseModel):

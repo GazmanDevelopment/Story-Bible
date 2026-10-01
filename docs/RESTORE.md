@@ -35,9 +35,6 @@ directly).
 
 ## Account deletions and restores
 
-*Applies once account deletion (#86) is released; before that there are no
-deletions to re-apply.*
-
 A backup is older than the live database, so it can contain people who have
 since deleted their account (the right to erasure), and restoring it would
 bring their data back. The live database records every deletion in a
@@ -50,11 +47,22 @@ bring their data back. The live database records every deletion in a
    sqlite3 /data/storybible.db "SELECT oid, deleted_at FROM deleted_users" > /data/deleted-users.txt
    sqlite3 /data/storybible.db "SELECT * FROM blocked_users" > /data/blocked-users.txt
    ```
-2. **Between steps 5 and 6** (the app is still stopped), for each oid in
-   `deleted-users.txt` remove the account from the restored database using
-   the same function the app's "Delete my account" uses (`delete_account_data`
-   in `app/main.py`; this also re-creates the tombstone), and re-insert any
-   missing `blocked_users` rows so a blocked person stays blocked.
+2. **Between steps 5 and 6** (the app is still stopped), copy the saved
+   tombstones and blocks into the restored database, then erase the deleted
+   accounts again with the script, which uses the same code as the app's
+   "Delete my account":
+   ```
+   sqlite3 /data/storybible.db <<'SQL'
+   CREATE TABLE IF NOT EXISTS deleted_users (oid TEXT PRIMARY KEY, deleted_at REAL NOT NULL);
+   CREATE TABLE IF NOT EXISTS blocked_users (oid TEXT PRIMARY KEY, blocked_at REAL NOT NULL, blocked_by TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '');
+   ATTACH '/data/storybible.db.before-restore' AS live;
+   INSERT OR REPLACE INTO deleted_users SELECT * FROM live.deleted_users;
+   INSERT OR REPLACE INTO blocked_users SELECT * FROM live.blocked_users;
+   SQL
+   python scripts/apply_tombstones.py /data/storybible.db
+   ```
+   (`deleted-users.txt` / `blocked-users.txt` are your written record of what
+   was carried over.)
 3. Only then start the app, so a restored database never serves traffic with
    deleted accounts in it.
 
