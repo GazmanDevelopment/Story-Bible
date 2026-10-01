@@ -11,7 +11,7 @@ const S = {
   tab: "characters",
   view: null,         // {kind, id} when editing a record, else null (list)
   filter: "",
-  tlChapter: "", tlChar: "",
+  tlChapter: "", tlChars: [], tlLocs: [],
   rsSort: "date_desc",  // research list: date_desc | date_asc | title
   docLink: null,      // {series_id, chapter_id} stored in the Word document
   me: null,           // {isAdmin, ...} from GET /api/me - only fetched in entra mode
@@ -363,6 +363,7 @@ async function revalidateBundle() {
   } catch { /* a background refresh: stay quiet, the next real action will surface any error */ }
 }
 async function selectSeries(id) {
+  if ((id || null) !== S.sid) { S.tlChars = []; S.tlLocs = []; }  // pills belong to one series
   S.sid = id || null; S.view = null; lsSet("sb_series", S.sid || "");
   await loadBundle(); render();
 }
@@ -479,22 +480,32 @@ function listEvents() {
   const chOpts = `<option value="">All chapters</option>` + S.b.chapters
     .sort((a, b) => (a.number || 0) - (b.number || 0))
     .map((c) => `<option value="${c.id}" ${S.tlChapter === c.id ? "selected" : ""}>Ch ${esc(c.number)}</option>`).join("");
-  const cOpts = `<option value="">All characters</option>` + [...S.b.characters].sort(byName)
-    .map((c) => `<option value="${c.id}" ${S.tlChar === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+  // pill filters highlight rather than hide; ignore ids deleted since they were picked
+  const chars = S.tlChars.filter((id) => rec("characters", id)), locs = S.tlLocs.filter((id) => rec("locations", id));
+  const pills = (label, kind, all, on) => all.length
+    ? `<div class="tl-pills"><span class="lbl">${label}</span><div class="chips">${all.map((x) =>
+      `<span class="chip ${on.includes(x.id) ? "on" : ""}" data-act="tl-chip" data-kind="${kind}" data-id="${x.id}">${esc(x.name)}</span>`).join("")}</div></div>`
+    : "";
+  const tlMatch = (e) => chars.every((id) => (e.character_ids || []).includes(id)) &&
+    (!locs.length || locs.includes(e.location_id));
   const items = S.b.events.filter(matches)
     .filter((e) => !S.tlChapter || e.chapter_id === S.tlChapter)
-    .filter((e) => !S.tlChar || (e.character_ids || []).includes(S.tlChar))
     .sort((a, b) => sortKey(a) - sortKey(b));
+  const filtering = chars.length || locs.length;
+  const nMatch = items.filter(tlMatch).length;
   const anchor = s.anchor_mode === "date" && s.anchor_date
     ? `Anchored at <b>${esc(s.anchor_date)}</b>` : `Relative timeline from <b>${esc(s.anchor_label || "Story start")}</b>`;
   return `<div class="hint">${anchor} · change in Series tab</div>` +
     toolbar("events", "Search events…") +
-    `<div class="toolbar"><select data-act="tl-chapter">${chOpts}</select><select data-act="tl-char">${cOpts}</select></div>` +
+    `<div class="toolbar"><select data-act="tl-chapter">${chOpts}</select></div>` +
+    pills("Characters", "characters", [...S.b.characters].sort(byName), chars) +
+    pills("Places", "locations", [...S.b.locations].sort(byName), locs) +
+    (filtering ? `<div class="hint tl-count">${nMatch} of ${items.length} match · <a href="#" data-act="tl-clear">Clear</a></div>` : "") +
     (items.length ? `<ul class="list tl">${items.map((e) => {
       const ages = (e.character_ids || []).map((id) => rec("characters", id)).filter(Boolean)
         .map((c) => { const a = ageAt(c, e); return `${c.name}${a !== null ? " " + a : ""}`; });
       const ch = rec("chapters", e.chapter_id), loc = rec("locations", e.location_id);
-      return `<li data-act="open" data-kind="events" data-id="${e.id}">
+      return `<li class="${filtering && !tlMatch(e) ? "dim" : ""}" data-act="open" data-kind="events" data-id="${e.id}">
         <div class="when">${esc(whenLabel(e))}</div>
         <div class="title">${esc(e.title)}</div>
         <div class="sub">${esc([ch && "Ch " + ch.number, loc && loc.name].filter(Boolean).join(" · "))}</div>
@@ -891,7 +902,7 @@ function updateWhenPreview() {
 async function onClick(ev) {
   const t = ev.target.closest("[data-act]"); if (!t) return;
   const act = t.dataset.act;
-  if (["save", "chip", "add-field", "add-rel", "del-rel", "delete", "delete-series",
+  if (["save", "chip", "tl-chip", "tl-clear", "add-field", "add-rel", "del-rel", "delete", "delete-series",
        "add-chapter", "del-chapter", "cancel", "insert", "export", "import-pick", "save-token",
        "log-issue", "log-suggestion", "save-feedback", "sign-in", "sign-out",
        "open-admin", "admin-block", "admin-unblock"].includes(act)) ev.preventDefault();
@@ -901,6 +912,12 @@ async function onClick(ev) {
       case "new": S.view = { kind: t.dataset.kind, id: null }; render(); break;
       case "cancel": if (!(await confirmDiscard())) return; S.view = null; render(); revalidateBundle(); break;
       case "chip": t.classList.toggle("on"); break;
+      case "tl-chip": {
+        const key = t.dataset.kind === "characters" ? "tlChars" : "tlLocs", id = t.dataset.id;
+        S[key] = S[key].includes(id) ? S[key].filter((x) => x !== id) : [...S[key], id];
+        render(); break;
+      }
+      case "tl-clear": S.tlChars = []; S.tlLocs = []; render(); break;
       case "modal-cancel": closeModal(false); break;
       case "modal-confirm": closeModal(true); break;
       case "new-series": await newSeries(); break;
@@ -1095,7 +1112,6 @@ function wire() {
       if (next === "__new") await newSeries(); else await selectSeries(next);
     }
     if (t.dataset.act === "tl-chapter") { S.tlChapter = t.value; render(); }
-    if (t.dataset.act === "tl-char") { S.tlChar = t.value; render(); }
     if (t.dataset.act === "research-sort") { S.rsSort = t.value; render(); }
     if (t.dataset.act === "doc-chapter") saveDocLink({ series_id: S.sid, chapter_id: t.value });
     if (t.id === "importFile" && t.files[0]) {

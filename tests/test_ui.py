@@ -227,6 +227,59 @@ def browser_page():
             browser.close()
 
 
+def test_timeline_pill_filters_grey_out_not_hide(server, browser_page):
+    """#97: character/place pills multi-select and grey out (never hide)
+    non-matching timeline entries. Characters AND together, places OR."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.select_option("#seriesSelect", label="Series A – The Lake House")
+    pg.click("#tabs >> text=Timeline")
+    pg.wait_for_selector(".tl li")
+    total = pg.locator(".tl li").count()
+    assert total == 5, total
+    assert pg.locator(".tl li.dim").count() == 0
+
+    def pill(name):
+        pg.click(f"[data-act=tl-chip]:text-is({name!r})")
+
+    def dimmed():
+        # every entry is still listed, whatever the filter
+        assert pg.locator(".tl li").count() == total
+        return pg.locator(".tl li.dim").count()
+
+    pill("Mark Hale")
+    assert dimmed() == 1                      # only the Kristy-only event
+    pill("Betsy Marr")
+    assert dimmed() == 2                      # AND: needs Mark and Betsy
+    assert "3 of 5 match" in pg.inner_text(".tl-count")
+    pill("The Lake House")
+    assert dimmed() == 3                      # ...and at the lake
+    pill("Kristy's flat")
+    assert dimmed() == 2                      # places OR together
+    pill("Kristy's flat")
+    pill("Betsy Marr")                        # toggling a pill off again
+    assert dimmed() == 3                      # Mark at the lake: only e2 and e4 match
+    pg.click("[data-act=tl-clear]")
+    assert dimmed() == 0
+    assert pg.locator(".tl-count").count() == 0
+
+    # a greyed-out entry is still a normal, openable entry
+    pill("Kristy Dunn")
+    pg.locator(".tl li.dim").first.click()
+    pg.wait_for_selector("form[data-kind=events]")
+    pg.click("[data-act=cancel] >> nth=0")
+    pg.wait_for_selector(".tl li")
+
+    # pills belong to one series: switching drops them
+    assert pg.locator("[data-act=tl-chip].on").count() == 1
+    pg.select_option("#seriesSelect", label="Series B – After Hours")
+    pg.wait_for_selector("text=Night one")
+    assert pg.locator("[data-act=tl-chip].on").count() == 0
+    assert pg.locator(".tl li.dim").count() == 0
+    assert not errors, errors
+
+
 def test_save_conflict_offers_reload_or_keep_mine(server, browser_page):
     """#58: a 409 (someone else saved first) must show a real reload/keep-
     mine choice, never overwrite silently, and never leave the user's own

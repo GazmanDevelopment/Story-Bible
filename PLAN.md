@@ -16,7 +16,7 @@ Status: **working demo** in this folder. The real build happens in VS Code, usin
 | Characters | Name, role, aliases, age at start, height, gender, hair, eyes, style, then **per-series default physical fields** (editable list), plus one-off fields per character, preferences, backstory, notes. |
 | Relationships | Directional links ("Betsy *mistress of* Mark") with notes. Shown on both characters. |
 | Places | Name, where, description, relevance, linked characters. |
-| Timeline | Anchor is either a real date or a label ("Night one"). Events are stored as **+years/months/days offsets**, negative for backstory. The pane shows the computed date and **each character's age at that event**. Filter by chapter or character. |
+| Timeline | Anchor is either a real date or a label ("Night one"). Events are stored as **+years/months/days offsets**, negative for backstory. The pane shows the computed date and **each character's age at that event**. Filter by chapter; select character and place pills to grey out entries that do not match (all chosen characters, any chosen place). |
 | Research | Freeform notes (title, rich-text body, date entered) linkable to a chapter and any number of characters/places/timeline events. Body is edited with a basic WYSIWYG editor (Quill); pasted/inserted images are resized and compressed client-side before saving. Searchable and sortable (newest/oldest/title). |
 | Word integration | **Find**: select a name in the doc, and the pane opens that character or place (aliases work). **Insert name at cursor.** |
 | Backup | Export a series as JSON, and import it back. |
