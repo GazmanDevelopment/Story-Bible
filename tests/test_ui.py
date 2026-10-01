@@ -395,7 +395,10 @@ def test_relationship_type_suggestions_are_editable_per_series(server, browser_p
     """#63: the relationship type field was always free text (nothing
     stopped typing "enemy of" before this) - what was missing was a way to
     grow the *suggested* list itself, the same way character_fields already
-    let you customize the per-series default character fields."""
+    let you customize the per-series default character fields.
+
+    #124: per-series additions must be suggested *alongside* the built-in
+    defaults, not instead of them."""
     pg, errors = browser_page
     pg.goto(server)
     pg.wait_for_selector(".list li")
@@ -412,7 +415,13 @@ def test_relationship_type_suggestions_are_editable_per_series(server, browser_p
     pg.wait_for_selector("form[data-kind=characters]")
 
     options = pg.eval_on_selector_all("#relTypes option", "els => els.map(e => e.value)")
-    assert options == ["enemy of", "rival of"]
+    # "rival of" is already a built-in default and must not be duplicated
+    assert options == [
+        "married to", "partner of", "mistress of", "lover of", "ex of",
+        "friend of", "best friend of", "sibling of", "parent of", "boss of",
+        "colleague of", "neighbour of", "rival of", "flirts with",
+        "enemy of",
+    ]
 
     assert not errors, errors
 

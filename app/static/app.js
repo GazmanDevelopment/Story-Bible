@@ -632,7 +632,7 @@ function characterForm(c, isNew) {
       <button type="button" data-act="add-rel">Add</button>
     </div>
     <input id="relNote" placeholder="Note (optional)" style="margin-top:4px">
-    <datalist id="relTypes">${(S.b.series.relationship_types?.length ? S.b.series.relationship_types : REL_TYPES)
+    <datalist id="relTypes">${[...new Set([...REL_TYPES, ...(S.b.series.relationship_types || [])])]
       .map((t) => `<option value="${esc(t)}">`).join("")}</datalist>
     <div class="hint">Reads as: <b>${esc(c.name)}</b> [type] [who]</div>
     <h3>Appears in timeline</h3>
@@ -809,7 +809,7 @@ function seriesForm() {
     <div class="hint">One per line. These appear on every character in this series.</div>
     <h3>Relationship type suggestions</h3>
     <textarea data-f="relationship_types" rows="6">${esc((s.relationship_types || []).join("\n"))}</textarea>
-    <div class="hint">One per line. Suggested while typing a relationship's type - you can always type something else too.</div>
+    <div class="hint">One per line, added to the built-in suggestions (married to, friend of, etc.) while typing a relationship's type - you can always type something else too.</div>
     <div class="formbar"><div><button type="button" class="danger" data-act="delete-series">Delete series</button></div>
       <div><button class="primary" data-act="save" data-kind="series">Save</button></div></div>
   </form>
@@ -1036,7 +1036,7 @@ async function onClick(ev) {
 
 async function newSeries() {
   const s = await api("/series", "POST", { data: { name: "New series", anchor_mode: "relative",
-    anchor_label: "Story start", character_fields: DEFAULT_FIELDS, relationship_types: REL_TYPES } });
+    anchor_label: "Story start", character_fields: DEFAULT_FIELDS } });
   await loadSeriesList(); S.tab = "series"; await selectSeries(s.id); toast("Series created — name it here");
 }
 
