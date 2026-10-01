@@ -99,6 +99,20 @@ def _v5_access_indexes(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS ix_members_oid ON members(oid)")
 
 
+def _v6_blocked_users(con: sqlite3.Connection) -> None:
+    """#82: people an administrator has blocked. A table of its own rather
+    than a column on `users` so a block outlives the `users` row - deleting
+    your account (#86) must not be a way round being blocked. No foreign key
+    to users, for the same reason."""
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS blocked_users (
+               oid TEXT PRIMARY KEY,
+               blocked_at REAL NOT NULL,
+               blocked_by TEXT NOT NULL,
+               reason TEXT NOT NULL DEFAULT '')"""
+    )
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
@@ -106,6 +120,7 @@ MIGRATIONS: list[Migration] = [
     _v3_ownership_and_sharing,
     _v4_concurrency_and_audit,
     _v5_access_indexes,
+    _v6_blocked_users,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

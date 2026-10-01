@@ -636,3 +636,73 @@ def test_feedback_notice_mentions_the_display_name_in_entra_mode(server, browser
     html = pg.evaluate("""() => { S.config = { ...S.config, authMode: "entra" }; return feedbackForm("suggestion"); }""")
     assert "public GitHub issue" in html and "Your display name is added to it." in html
     assert not errors, errors
+
+
+def test_admin_button_and_user_list_only_for_admins(server, browser_page):
+    """#82. Entra mode can't run in this suite, so this drives the renderers
+    with state set by hand; the server's own 404 for non-admins is covered in
+    tests/test_admin_users.py."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    bar = lambda: pg.evaluate("""() => { renderHeader(); return $("#authBar").innerHTML; }""")
+    pg.evaluate("""() => { S.config = { ...S.config, authMode: "entra" };
+        msalAccount = { name: "Me" }; S.me = { oid: "me", isAdmin: false }; }""")
+    assert "Admin" not in bar()
+    pg.evaluate("""() => { S.me = { oid: "me", isAdmin: true }; }""")
+    assert 'data-act="open-admin"' in bar()
+    pg.evaluate("""() => { S.adminUsers = { total: 2, users: [
+        { oid: "me", display_name: "Me", email: "me@x.com", first_seen: 1, last_seen: 2, series_owned: 1,
+          series_shared: 0, records: { characters: 2, events: 0 }, bytes_used: 2048, blocked: false },
+        { oid: "u2", display_name: "<img src=x onerror=alert(1)>", email: "b@x.com", first_seen: 1, last_seen: 2,
+          series_owned: 0, series_shared: 1, records: {}, bytes_used: 0, blocked: true, blocked_reason: "spam" }] };
+        S.view = { kind: "admin", id: null }; render(); }""")
+    html = pg.inner_html("#main")
+    assert "Users (2)" in html and "2 characters" in html and "(blocked: spam)" in html
+    assert "<img" not in html                                   # names are escaped
+    assert pg.locator("[data-act=admin-block]").count() == 0    # you can't block yourself; u2 is already blocked
+    assert pg.locator("[data-act=admin-unblock]").count() == 1
+    assert not errors, errors
+
+
+def test_admin_view_buttons_call_the_api_and_reload(server, browser_page):
+    """#82: drives the real click handlers with api() and the confirm modal stubbed."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.evaluate("""() => {
+        window.calls = [];
+        const users = [{ oid: "a/b", display_name: "Ann", email: "a@x.com", first_seen: 1, last_seen: 2, series_owned: 0,
+                         series_shared: 0, records: {}, bytes_used: 0, blocked: false }];
+        window.api = async (path, method = "GET", body) => {
+            window.calls.push([method, path, body]);
+            if (path === "/admin/users") return { total: 1, users };
+            return {};
+        };
+        window.showModal = async () => true;
+        S.config = { ...S.config, authMode: "entra" }; msalAccount = { name: "Me" }; S.me = { oid: "me", isAdmin: true };
+        renderHeader();
+    }""")
+    pg.click("[data-act=open-admin]")
+    pg.wait_for_selector("[data-act=admin-block]")
+    pg.click("[data-act=admin-block]")
+    pg.wait_for_function("window.calls.some(c => c[0] === 'PUT')")
+    calls = pg.evaluate("window.calls")
+    assert ["PUT", "/admin/users/a%2Fb/block", {"reason": ""}] in calls     # oid is URL-encoded
+    assert calls[-1][1] == "/admin/users"                                   # list reloaded afterwards
+    assert not errors, errors
+
+
+def test_admin_view_shows_an_error_instead_of_loading_forever(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.evaluate("""() => {
+        window.api = async () => { throw new Error("boom"); };
+        S.config = { ...S.config, authMode: "entra" }; msalAccount = { name: "Me" }; S.me = { oid: "me", isAdmin: true };
+        renderHeader();
+    }""")
+    pg.click("[data-act=open-admin]")
+    pg.wait_for_selector("text=Couldn't load the user list: boom")
+    assert pg.locator("[data-act=open-admin]").count() >= 1                 # "Try again"
+    assert not errors, errors

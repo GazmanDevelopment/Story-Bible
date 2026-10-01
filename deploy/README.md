@@ -138,3 +138,14 @@ version**, or the container refuses to start (a crash loop with a clear
   them. If any such series still exist and this is unset, the server logs a
   warning at startup and nobody signed in can see them. If you signed in
   after #11 shipped they were already claimed and you need do nothing.
+
+### Administrators: viewing and blocking users (#82)
+
+Set `ADMIN_OIDS` to a comma-separated list of the Entra object ids of the
+people who should administer the server (your own `oid` is shown by
+`GET /api/me`). They get an **Admin** button in the task pane listing everyone
+who has signed in - name, email, last active, how many series and records they
+own and how much space they use (never story content) - with Block/Unblock.
+A blocked person is refused (403) on their next request; their data is kept.
+Use object ids, not emails: with open signup an email can be forged. Unset
+means nobody is an administrator.

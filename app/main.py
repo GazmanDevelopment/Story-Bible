@@ -52,6 +52,10 @@ keeps behaving exactly as before with no other change required).
                     everyone Entra lets in (#70)
   LEGACY_OWNER_OID  the one Entra object id that owns series created before
                     sign-in existed; unset = nobody claims them (#70)
+  ADMIN_OIDS        comma-separated Entra object ids of the administrators who
+                    get the pane's Admin view (users, usage, blocking). Object
+                    ids only, never emails - with open signup an email claim
+                    can be forged. AUTH_MODE=entra only; unset = no admins (#82)
 
 Nightly backups (VACUUM INTO + a JSON export per series) run in-process -
 see app/backup.py for BACKUP_DIR/BACKUP_KEEP_DAYS/BACKUP_HOUR and the
@@ -77,12 +81,12 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
@@ -411,6 +415,10 @@ LAST_SEEN_REFRESH_SECONDS = 300
 # database file underneath a RUNNING process is not supported anyway - restart
 # it, which also clears this - see docs/RESTORE.md.
 _seen_users: dict[tuple[str, str], tuple[str, str, float]] = {}
+# Bumped by every block (#82). get_current_user reads it before its DB check and
+# only caches the person if it hasn't moved, so a request that was already past
+# the blocked_users check can't re-create the cache entry a block just evicted.
+_block_epoch = 0
 
 
 def get_current_user(
@@ -441,12 +449,17 @@ def get_current_user(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     if not user.is_pipeline:
         key, now = (DB_PATH, user.oid), time.monotonic()
+        epoch = _block_epoch
         seen = _seen_users.get(key)
         if seen and seen[:2] == (user.email, user.display_name) and now - seen[2] < LAST_SEEN_REFRESH_SECONDS:
             return user  # already recorded a moment ago: no connection, no write
         # write=True when capped so two first sign-ins can't both squeeze past
         # MAX_USERS (#89); uncapped, this stays the cheap lazy transaction.
         with db(write=MAX_USERS > 0) as con:
+            if con.execute("SELECT 1 FROM blocked_users WHERE oid=?", (user.oid,)).fetchone():
+                # #82. Never reaches the _seen_users cache below, and
+                # admin_block_user() evicts any entry made before the block.
+                raise HTTPException(403, "This account has been disabled")
             if MAX_USERS > 0 and not con.execute("SELECT 1 FROM users WHERE oid=?", (user.oid,)).fetchone():
                 # (LEGACY_OWNER_OID is exempt: refusing them would strand the pre-sign-in series.)
                 if (user.oid != auth.LEGACY_OWNER_OID
@@ -462,7 +475,8 @@ def get_current_user(
                 # The SELECT keeps this a read (no write lock) once
                 # everything has been claimed.
                 con.execute("UPDATE series SET owner_oid=? WHERE owner_oid=''", (user.oid,))
-        _seen_users[key] = (user.email, user.display_name, now)
+        if epoch == _block_epoch:
+            _seen_users[key] = (user.email, user.display_name, now)
     return user
 
 
@@ -474,6 +488,19 @@ def require_person(user: auth.CurrentUser = Depends(get_current_user)) -> auth.C
     so they need this instead (#70)."""
     if user.is_pipeline:
         raise HTTPException(403, "The review pipeline is read-only")
+    return user
+
+
+def is_admin(user: auth.CurrentUser) -> bool:
+    return auth.AUTH_MODE == "entra" and not user.is_pipeline and user.oid.lower() in auth.ADMIN_OIDS
+
+
+def require_admin(user: auth.CurrentUser = Depends(require_person)) -> auth.CurrentUser:
+    """Admin-only routes (#82). 404, not 403, for everyone else so the routes
+    aren't advertised. Admins are named by oid in ADMIN_OIDS - see auth.py for
+    why never by email."""
+    if not is_admin(user):
+        raise HTTPException(404, "Not found")
     return user
 
 
@@ -535,6 +562,8 @@ TAGS_METADATA = [
     {"name": "series", "description": "A series is the top-level container everything else hangs off. "
         "Records are stored as free-form JSON (see module docstring), so request/response bodies here "
         "are intentionally loosely typed rather than validated on the way out."},
+    {"name": "admin", "description": "Registered-user overview and blocking, for the administrators named in "
+        "ADMIN_OIDS (#82). Account data and counts only - never story content. 404 for everyone else."},
     {"name": "sharing", "description": "Owner/editor/viewer membership on a series (#11)."},
     {"name": "records", "description": "Chapters, characters, locations, events, relationships and "
         "research entries within a series."},
@@ -922,11 +951,13 @@ class MeOut(BaseModel):
     email: str
     displayName: str
     isPipeline: bool
+    isAdmin: bool = False
 
 
 @app.get("/api/me", tags=["auth"], response_model=MeOut)
 def get_me(user: auth.CurrentUser = Depends(get_current_user)):
-    return {"oid": user.oid, "email": user.email, "displayName": user.display_name, "isPipeline": user.is_pipeline}
+    return {"oid": user.oid, "email": user.email, "displayName": user.display_name,
+            "isPipeline": user.is_pipeline, "isAdmin": is_admin(user)}
 
 
 class UserOut(BaseModel):
@@ -984,6 +1015,100 @@ def lookup_user(email: str | None = None, oid: str | None = None,
 
 
 # ---- series
+class AdminUserOut(BaseModel):
+    oid: str
+    email: str
+    display_name: str
+    first_seen: float
+    last_seen: float
+    series_owned: int
+    series_shared: int
+    records: dict[str, int]
+    bytes_used: int
+    blocked: bool
+    blocked_at: float | None = None
+    blocked_by: str | None = None
+    blocked_reason: str | None = None
+
+
+class AdminUsersOut(BaseModel):
+    total: int
+    users: list[AdminUserOut]
+
+
+@app.get("/api/admin/users", tags=["admin"], response_model=AdminUsersOut)
+def admin_list_users(limit: int = Query(500, ge=1, le=1000), admin: auth.CurrentUser = Depends(require_admin)):
+    """Everyone who has signed in - blocked people first (a blocked person stops
+    being active, so they would otherwise sink past `limit` and could never be
+    unblocked), then most recently active - with how much
+    each owns (#82). Counts and sizes only, never record contents. A handful
+    of grouped queries rather than one per user. `last_seen` is refreshed at
+    most every LAST_SEEN_REFRESH_SECONDS, so it is "roughly when"."""
+    with db() as con:
+        total = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        users = con.execute(
+            "SELECT u.oid, u.email, u.display_name, u.first_seen, u.last_seen, "
+            "       b.blocked_at, b.blocked_by, b.reason "
+            "FROM users u LEFT JOIN blocked_users b ON b.oid = u.oid "
+            "ORDER BY b.blocked_at IS NULL, u.last_seen DESC LIMIT ?", (limit,)).fetchall()
+        owned = dict(con.execute("SELECT owner_oid, COUNT(*) FROM series GROUP BY owner_oid").fetchall())
+        shared = dict(con.execute("SELECT oid, COUNT(*) FROM members GROUP BY oid").fetchall())
+        series_bytes = dict(con.execute(
+            "SELECT owner_oid, SUM(LENGTH(CAST(data AS BLOB))) FROM series GROUP BY owner_oid").fetchall())
+        kinds: dict[str, dict[str, int]] = {}
+        rec_bytes: dict[str, int] = {}
+        for owner, kind, n, size in con.execute(
+                "SELECT s.owner_oid, r.kind, COUNT(*), SUM(LENGTH(CAST(r.data AS BLOB))) "
+                "FROM records r JOIN series s ON s.id = r.series_id GROUP BY s.owner_oid, r.kind"):
+            kinds.setdefault(owner, {})[kind] = n
+            rec_bytes[owner] = rec_bytes.get(owner, 0) + size
+    return {"total": total, "users": [{
+        "oid": u["oid"], "email": u["email"], "display_name": u["display_name"],
+        "first_seen": u["first_seen"], "last_seen": u["last_seen"],
+        "series_owned": owned.get(u["oid"], 0), "series_shared": shared.get(u["oid"], 0),
+        "records": {k: kinds.get(u["oid"], {}).get(k, 0) for k in KINDS},
+        "bytes_used": (series_bytes.get(u["oid"]) or 0) + rec_bytes.get(u["oid"], 0),
+        "blocked": u["blocked_at"] is not None, "blocked_at": u["blocked_at"],
+        "blocked_by": u["blocked_by"], "blocked_reason": u["reason"],
+    } for u in users]}
+
+
+class BlockedOut(BaseModel):
+    blocked: bool
+
+
+class BlockBody(BaseModel):
+    reason: str = Field("", max_length=500)
+
+
+@app.put("/api/admin/users/{oid}/block", tags=["admin"], response_model=BlockedOut, dependencies=WRITE_LIMIT)
+def admin_block_user(oid: str, body: BlockBody | None = None, admin: auth.CurrentUser = Depends(require_admin)):
+    """Block a signed-in person (#82): every later request from them gets 403.
+    Their data stays (blocking is not deleting). You can't block yourself or
+    another administrator."""
+    if oid.lower() == admin.oid.lower() or oid.lower() in auth.ADMIN_OIDS:
+        raise HTTPException(400, "Administrators can't be blocked")
+    with db(write=True) as con:
+        if not con.execute("SELECT 1 FROM users WHERE oid=?", (oid,)).fetchone():
+            raise HTTPException(404, "No such user")
+        con.execute("INSERT OR REPLACE INTO blocked_users (oid, blocked_at, blocked_by, reason) VALUES (?,?,?,?)",
+                    (oid, time.time(), admin.oid, (body.reason if body else "").strip()))
+    # Take effect now, not after the 5-minute cache entry expires.
+    global _block_epoch
+    _block_epoch += 1
+    _seen_users.pop((DB_PATH, oid), None)
+    logger.info("admin %s blocked user %s", _sanitize_for_log(admin.oid), _sanitize_for_log(oid))
+    return {"blocked": True}
+
+
+@app.delete("/api/admin/users/{oid}/block", tags=["admin"], response_model=BlockedOut, dependencies=WRITE_LIMIT)
+def admin_unblock_user(oid: str, admin: auth.CurrentUser = Depends(require_admin)):
+    with db(write=True) as con:
+        con.execute("DELETE FROM blocked_users WHERE oid=?", (oid,))  # idempotent: a double click is not an error
+    logger.info("admin %s unblocked user %s", _sanitize_for_log(admin.oid), _sanitize_for_log(oid))
+    return {"blocked": False}
+
+
 @app.get("/api/series", tags=["series"])
 def list_series(summary: bool = False, user: auth.CurrentUser = Depends(get_current_user)):
     """`?summary=true` returns just id/name/version/owner - what a series

@@ -109,3 +109,19 @@ def test_failed_migration_rolls_back_and_leaves_version_unchanged(monkeypatch):
     tables = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     assert tables == []  # the CREATE TABLE was rolled back
     con.close()
+
+
+def test_v6_adds_blocked_users_and_upgrades_a_v5_database():
+    """#82: blocks live in their own table, with no foreign key to users, so
+    removing a user row doesn't remove the block."""
+    from app.migrations import MIGRATIONS
+    con = _new_db()
+    for v in range(1, 6):
+        con.execute("BEGIN IMMEDIATE"); MIGRATIONS[v - 1](con); con.execute(f"PRAGMA user_version = {v}"); con.commit()
+    con.execute("INSERT INTO users (oid, first_seen, last_seen) VALUES ('u', 0, 0)")
+    migrate(con)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 6
+    con.execute("INSERT INTO blocked_users (oid, blocked_at, blocked_by) VALUES ('u', 1, 'admin')")
+    con.execute("DELETE FROM users WHERE oid='u'")
+    assert con.execute("SELECT reason FROM blocked_users WHERE oid='u'").fetchone() == ("",)
+    con.close()

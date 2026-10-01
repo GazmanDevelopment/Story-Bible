@@ -14,6 +14,9 @@ const S = {
   tlChapter: "", tlChar: "",
   rsSort: "date_desc",  // research list: date_desc | date_asc | title
   docLink: null,      // {series_id, chapter_id} stored in the Word document
+  me: null,           // {isAdmin, ...} from GET /api/me - only fetched in entra mode
+  adminError: null,
+  adminUsers: null,   // admin view's user list
   config: null,       // {authMode, tenantId, clientId} from GET /api/config (#13)
   formSnapshot: null, // JSON of the open form's fields right after rendering - unsaved-changes guard (#58)
 };
@@ -305,6 +308,12 @@ async function insertText(text) {
 }
 
 // ------------------------------------------------------------------- loading
+async function loadMe() {
+  // Only to know whether to show the Admin button; the server enforces it.
+  S.me = null;
+  if (S.config?.authMode !== "entra") return;
+  try { S.me = await api("/me"); } catch { /* not fatal: no admin button */ }
+}
 async function loadSeriesList() {
   // summary: just id/name/version - the picker needs nothing else, and a
   // series' full settings can be very large (#72).
@@ -367,7 +376,7 @@ function renderHeader() {
 
   const ab = $("#authBar");
   ab.innerHTML = S.config?.authMode !== "entra" ? "" : (msalAccount
-    ? `<span>${esc(msalAccount.name || msalAccount.username || "Signed in")}</span><button class="small" data-act="sign-out">Sign out</button>`
+    ? `<span>${esc(msalAccount.name || msalAccount.username || "Signed in")}</span>${S.me?.isAdmin ? `<button class="small" data-act="open-admin">Admin</button>` : ""}<button class="small" data-act="sign-out">Sign out</button>`
     : `<button class="small primary" data-act="sign-in">Sign in</button>`);
 
   const lb = $("#linkBar");
@@ -390,6 +399,7 @@ function render() {
   // it were gated behind having one, a user hitting a bug that prevents
   // creating their first series could never report that exact bug.
   if (S.view?.kind === "feedback") { m.innerHTML = renderForm(); captureFormSnapshot(); return; }
+  if (S.view?.kind === "admin") { m.innerHTML = `<button class="link back" data-act="cancel">← Back</button>` + adminView(); S.formSnapshot = null; return; }
   if (!S.b) {
     S.formSnapshot = null;
     m.innerHTML = `<div class="empty">Create a series to get started.<br><br>
@@ -795,6 +805,32 @@ function seriesForm() {
   <button type="button" data-act="save-token">Save token</button>` : ""}`;
 }
 
+function fmtBytes(n) { return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`; }
+function fmtWhen(t) { return t ? new Date(t * 1000).toLocaleString() : "never"; }
+function adminView() {
+  const list = S.adminUsers;
+  if (S.adminError) return `<h2>Users</h2><div class="hint">Couldn't load the user list: ${esc(S.adminError)}</div>
+    <button type="button" data-act="open-admin">Try again</button>`;
+  if (!list) return `<h2>Users</h2><div class="hint">Loading…</div>`;
+  return `<h2>Users (${list.total})</h2>
+    <div class="hint">Account details and amounts only - story content is never shown. "Last active" is approximate.${
+      list.users.length < list.total ? ` Showing the ${list.users.length} most recently active.` : ""}</div>
+    ${list.users.map((u) => `<div class="rel" style="align-items:flex-start">
+      <div><b>${esc(u.display_name || u.oid)}</b>${u.blocked ? ` <span class="note">(blocked${u.blocked_reason ? ": " + esc(u.blocked_reason) : ""})</span>` : ""}
+        <div class="note">${esc(u.email)}</div>
+        <div class="note">Last active ${esc(fmtWhen(u.last_seen))} · joined ${esc(fmtWhen(u.first_seen))}</div>
+        <div class="note">${u.series_owned} series · ${Object.entries(u.records).filter(([, n]) => n).map(([k, n]) => `${n} ${esc(k)}`).join(", ") || "no records"} · ${fmtBytes(u.bytes_used)}${u.series_shared ? ` · shared into ${u.series_shared}` : ""}</div></div>
+      ${u.oid === S.me?.oid ? "" : u.blocked
+        ? `<button type="button" class="small" data-act="admin-unblock" data-oid="${esc(u.oid)}">Unblock</button>`
+        : `<button type="button" class="small danger" data-act="admin-block" data-oid="${esc(u.oid)}">Block</button>`}</div>`).join("")}`;
+}
+async function loadAdminUsers() {
+  S.adminError = null;
+  try { S.adminUsers = await api("/admin/users"); }
+  catch (err) { S.adminError = err.message; }
+  if (S.view?.kind === "admin") render();
+}
+
 function feedbackForm(kind) {
   const label = kind === "issue" ? "Log an issue" : "Log a suggestion";
   return `<form data-kind="feedback" data-feedback-kind="${kind}">
@@ -840,7 +876,8 @@ async function onClick(ev) {
   const act = t.dataset.act;
   if (["save", "chip", "add-field", "add-rel", "del-rel", "delete", "delete-series",
        "add-chapter", "del-chapter", "cancel", "insert", "export", "import-pick", "save-token",
-       "log-issue", "log-suggestion", "save-feedback", "sign-in", "sign-out"].includes(act)) ev.preventDefault();
+       "log-issue", "log-suggestion", "save-feedback", "sign-in", "sign-out",
+       "open-admin", "admin-block", "admin-unblock"].includes(act)) ev.preventDefault();
   try {
     switch (act) {
       case "open": S.view = { kind: t.dataset.kind, id: t.dataset.id }; render(); window.scrollTo(0, 0); break;
@@ -897,7 +934,17 @@ async function onClick(ev) {
       case "import-pick": $("#importFile").click(); break;
       case "save-token": lsSet("sb_token", $("#tokenInput").value.trim()); await boot(); toast("Token saved"); break;
       case "sign-in": await signIn(); if (msalAccount) { await loadApp(); } else { renderHeader(); } break;
-      case "sign-out": await signOut(); S.b = null; S.seriesList = []; render(); break;
+      case "sign-out": await signOut(); S.b = null; S.me = null; S.view = null; S.seriesList = []; render(); break;
+      case "open-admin": S.view = { kind: "admin", id: null }; S.adminUsers = null; S.adminError = null; render(); await loadAdminUsers(); break;
+      case "admin-block": {
+        const u = S.adminUsers.users.find((x) => x.oid === t.dataset.oid);
+        if (!(await showModal(`Block ${u?.display_name || "this user"}? They will be refused until you unblock them. Their data is kept.`, "Block"))) return;
+        await api(`/admin/users/${encodeURIComponent(t.dataset.oid)}/block`, "PUT", { reason: "" });
+        await loadAdminUsers(); toast("Blocked"); break;
+      }
+      case "admin-unblock":
+        await api(`/admin/users/${encodeURIComponent(t.dataset.oid)}/block`, "DELETE");
+        await loadAdminUsers(); toast("Unblocked"); break;
       case "log-issue": S.view = { kind: "feedback", id: null, feedbackKind: "issue" }; render(); break;
       case "log-suggestion": S.view = { kind: "feedback", id: null, feedbackKind: "suggestion" }; render(); break;
       case "save-feedback": {
@@ -1046,6 +1093,7 @@ function wire() {
 
 async function loadApp() {
   try {
+    await loadMe();
     await loadSeriesList();
     await readDocLink();
     const want = (S.docLink && S.docLink.series_id) || lsGet("sb_series");
