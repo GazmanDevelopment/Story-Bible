@@ -862,13 +862,50 @@ class UserOut(BaseModel):
 
 @app.get("/api/users", tags=["auth"], response_model=list[UserOut])
 def list_users(user: auth.CurrentUser = Depends(require_person)):
-    """People who have signed in at least once (#11) - for picking who to
-    share a series with. Not scoped to any one series; being listed here
-    only means "known to this server", the same low bar as showing up in
-    anyone's Entra directory."""
+    """Your contacts (#11, #88): you, plus the owners and members of every
+    series you can access. With open signup (#85) the users table holds
+    strangers, so it is no longer listed wholesale; to share with someone
+    you don't yet share a series with, look them up by exact email via
+    /api/users/lookup. AUTH_MODE none/token has one shared bible, so
+    everyone is a contact there."""
     with db() as con:
-        rows = con.execute("SELECT oid, email, display_name FROM users ORDER BY display_name").fetchall()
+        if auth.AUTH_MODE != "entra":
+            rows = con.execute("SELECT oid, email, display_name FROM users ORDER BY display_name").fetchall()
+        else:
+            rows = con.execute(
+                "WITH mine AS (SELECT id, owner_oid FROM series WHERE owner_oid=:me "
+                "              OR id IN (SELECT series_id FROM members WHERE oid=:me)) "
+                "SELECT oid, email, display_name FROM users WHERE oid=:me "
+                "OR oid IN (SELECT owner_oid FROM mine) "
+                "OR oid IN (SELECT oid FROM members WHERE series_id IN (SELECT id FROM mine)) "
+                "ORDER BY display_name",
+                {"me": user.oid},
+            ).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/users/lookup", tags=["auth"], response_model=UserOut)
+def lookup_user(email: str | None = None, oid: str | None = None,
+                user: auth.CurrentUser = Depends(require_person)):
+    """Find one person by exact email (case-insensitive) or exact oid, so a
+    series can be shared with someone new without enumerating the directory
+    (#88). No partial or wildcard matching: LIKE metacharacters are just
+    literal characters here. 404 if nobody matches."""
+    email = (email or "").strip()
+    if bool(email) == bool(oid):
+        raise HTTPException(400, "Give exactly one of email or oid")
+    with db() as con:
+        if email:
+            rows = con.execute(
+                "SELECT oid, email, display_name FROM users WHERE lower(email)=lower(?)", (email,)
+            ).fetchall()
+        else:
+            rows = con.execute("SELECT oid, email, display_name FROM users WHERE oid=?", (oid,)).fetchall()
+    if len(rows) > 1:  # users.email isn't unique (e.g. a guest and a member account)
+        raise HTTPException(409, "More than one account has that email - share using their oid instead")
+    if not rows:
+        raise HTTPException(404, "No matching user - they need to have signed in at least once")
+    return dict(rows[0])
 
 
 # ---- series
