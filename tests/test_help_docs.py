@@ -88,6 +88,23 @@ def test_favicons_present_and_referenced():
         rels = {link.get("rel") for link in _scan(page).links}
         assert {"icon", "apple-touch-icon"} <= rels, page.name
     assert 'rel="icon"' in APP_HTML
+    assert 'rel="apple-touch-icon"' in APP_HTML
+
+
+def test_web_app_serves_the_same_favicon_as_the_help_pages():
+    """#116: the web app shows the help guide's favicon, not just the add-in icon."""
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    assert 'href="favicon.ico"' in APP_HTML
+    c = TestClient(main.app)
+    r = c.get("/favicon.ico")
+    assert r.status_code == 200
+    assert r.content == (DOCS / "favicon.ico").read_bytes()
+    r = c.get("/assets/apple-touch-icon.png")
+    assert r.status_code == 200
+    assert r.content == (DOCS / "help" / "apple-touch-icon.png").read_bytes()
 
 
 def test_screenshots_script_covers_every_guide_image():
