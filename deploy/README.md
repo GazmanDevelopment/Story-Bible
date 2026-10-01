@@ -139,6 +139,21 @@ version**, or the container refuses to start (a crash loop with a clear
   warning at startup and nobody signed in can see them. If you signed in
   after #11 shipped they were already claimed and you need do nothing.
 
+### Open signup: the client sign-in authority (#91)
+
+`GET /api/config` now returns the MSAL `authority` for the pane and the sign-in
+dialog: the home tenant in `SIGNUP_MODE=allowlist` (unchanged), and
+`https://login.microsoftonline.com/common` in `open` mode. For personal
+Microsoft accounts to work in `open` mode, the Entra app registration must be
+set to "Accounts in any organizational directory and personal Microsoft
+accounts" and have `accessTokenAcceptedVersion` = 2 in its manifest (otherwise
+personal-account tokens carry a v1 issuer and are rejected). Some other
+organisations block user consent, so their people will see an admin-consent
+prompt; that is expected. Optionally set `PRIVACY_URL` and `TERMS_URL` (https)
+to show privacy and terms links before first sign-in. After changing
+`SIGNUP_MODE`, people who are already signed in should sign out and back in,
+because their cached account belongs to the old authority.
+
 ### Administrators: viewing and blocking users (#82)
 
 Set `ADMIN_OIDS` to a comma-separated list of the Entra object ids of the

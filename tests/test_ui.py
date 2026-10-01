@@ -706,3 +706,77 @@ def test_admin_view_shows_an_error_instead_of_loading_forever(server, browser_pa
     pg.wait_for_selector("text=Couldn't load the user list: boom")
     assert pg.locator("[data-act=open-admin]").count() >= 1                 # "Try again"
     assert not errors, errors
+
+
+ENTRA_CONFIG = {"authMode": "entra", "tenantId": "t-home", "clientId": "cid",
+                "authority": "https://login.microsoftonline.com/common",
+                "privacyUrl": "https://example.com/privacy", "termsUrl": "https://example.com/terms"}
+
+
+def _boot_with_config(pg, server, cfg):
+    """Serve `cfg` as /api/config, stub MSAL (no network) and re-run boot();
+    returns the config object MSAL was created with."""
+    pg.route("**/api/config", lambda route: route.fulfill(json=cfg))
+    pg.goto(server)
+    pg.wait_for_function("typeof initAuth === 'function' && typeof msal !== 'undefined'")
+    return pg.evaluate("""async () => {
+        let seen = null;
+        msal.createNestablePublicClientApplication = async (c) => { seen = c; return { getAllAccounts: () => [] }; };
+        msal.PublicClientApplication = function (c) { seen = c; this.initialize = async () => {}; this.getAllAccounts = () => []; };
+        await boot();
+        return { msalConfig: seen, main: document.querySelector("#main").innerHTML };
+    }""")
+
+
+def test_msal_uses_the_authority_from_config(server, browser_page):
+    """#91: the pane no longer builds its own tenant authority string."""
+    pg, errors = browser_page
+    out = _boot_with_config(pg, server, ENTRA_CONFIG)
+    assert out["msalConfig"]["auth"]["authority"] == "https://login.microsoftonline.com/common"
+    assert out["msalConfig"]["auth"]["clientId"] == "cid"
+    assert not errors, errors
+
+
+def test_msal_falls_back_to_the_tenant_authority_for_an_older_server(server, browser_page):
+    pg, errors = browser_page
+    cfg = {k: v for k, v in ENTRA_CONFIG.items() if k not in ("authority", "privacyUrl", "termsUrl")}
+    out = _boot_with_config(pg, server, cfg)
+    assert out["msalConfig"]["auth"]["authority"] == "https://login.microsoftonline.com/t-home"
+    assert "legal-links" not in out["main"]
+    assert not errors, errors
+
+
+def test_signed_out_pane_shows_privacy_and_terms_links(server, browser_page):
+    """#100/#91: visible before anyone's first sign-in; https only, escaped."""
+    pg, errors = browser_page
+    out = _boot_with_config(pg, server, ENTRA_CONFIG)
+    assert "Sign in to continue" in out["main"]
+    assert 'href="https://example.com/privacy"' in out["main"] and 'href="https://example.com/terms"' in out["main"]
+    assert 'rel="noopener noreferrer"' in out["main"]
+    bad = dict(ENTRA_CONFIG, privacyUrl="javascript:alert(1)", termsUrl="")
+    pg.unroute("**/api/config")
+    out = _boot_with_config(pg, server, bad)
+    assert "legal-links" not in out["main"] and "javascript:" not in out["main"]
+    assert not errors, errors
+
+
+def test_sign_in_dialog_uses_config_authority_and_shows_links(server, browser_page):
+    pg, errors = browser_page
+    pg.route("**/api/config", lambda route: route.fulfill(json=ENTRA_CONFIG))
+    pg.route("**/office.js", lambda route: route.fulfill(
+        body="window.Office={onReady:(f)=>setTimeout(f,0),context:{ui:{messageParent:(m)=>{window.__msg=m}}}};",
+        content_type="application/javascript"))
+    pg.add_init_script("""window.msal = { PublicClientApplication: function (c) { window.__cfg = c;
+        this.initialize = async () => {}; this.handleRedirectPromise = async () => null; window.__redirected = false; this.loginRedirect = async () => { window.__redirected = true; }; } };""")
+    pg.route("**/vendor/msal/msal-browser.min.js", lambda route: route.fulfill(body="", content_type="application/javascript"))
+    pg.goto(server + "/auth-dialog.html")
+    pg.wait_for_function("window.__cfg")
+    assert pg.evaluate("window.__cfg.auth.authority") == "https://login.microsoftonline.com/common"
+    # it waits for the person to see the links and click before leaving for Entra
+    pg.wait_for_selector("#continue")
+    assert pg.evaluate("window.__redirected") is False
+    pg.click("#continue")
+    pg.wait_for_function("window.__redirected === true")
+    hrefs = pg.eval_on_selector_all("#legal a", "els => els.map(e => e.href)")
+    assert hrefs == ["https://example.com/privacy", "https://example.com/terms"]
+    assert not errors, errors

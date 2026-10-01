@@ -112,3 +112,5 @@ label > span { display: block; font-size: 12px; color: var(--muted); margin-bott
 .word-only { display: none !important; }
 body.in-word .word-only { display: flex !important; }
 body.in-word button.word-only { display: inline-block !important; }
+.legal-links { font-size: 12px; margin-top: 16px; }
+.legal-links a { color: var(--muted); }

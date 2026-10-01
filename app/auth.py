@@ -143,6 +143,14 @@ def jwks_url() -> str:
     return f"https://login.microsoftonline.com/{authority}/discovery/v2.0/keys"
 
 
+def authority() -> str:
+    """The MSAL authority the task pane / sign-in dialog should use (#91).
+    Same tenant-vs-common choice as jwks_url(): open mode must offer
+    work/school accounts from any tenant plus personal accounts."""
+    tenant = "common" if SIGNUP_MODE == "open" else ENTRA_TENANT_ID
+    return f"https://login.microsoftonline.com/{tenant}"
+
+
 def issuer(tid: str | None = None) -> str:
     """Expected `iss`. Allowlist mode: always the home tenant. Open mode: the
     tenant the token itself claims (`tid`), so the caller must have verified

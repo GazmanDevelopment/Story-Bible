@@ -7,6 +7,29 @@
  * here, then hand the resulting account off to the task pane (which
  * shares this same origin's localStorage MSAL cache) and close.
  */
+// Privacy / terms links so they are visible before first sign-in (#91). Built
+// with DOM calls (no innerHTML); only https URLs are used. The dialog would
+// otherwise redirect to Entra straight away, so when there are links to show
+// this waits for a Continue click; with none configured it resolves at once.
+function confirmAfterLegalLinks(cfg) {
+  const box = document.getElementById("legal");
+  if (!box) return Promise.resolve();
+  [["Privacy policy", cfg.privacyUrl], ["Terms of use", cfg.termsUrl]].forEach(([label, url]) => {
+    if (!/^https:\/\//i.test(url || "")) return;
+    if (box.childNodes.length) box.append(" · ");
+    const a = document.createElement("a");
+    a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer"; a.textContent = label;
+    box.append(a);
+  });
+  if (!box.childNodes.length) return Promise.resolve();
+  return new Promise((resolve) => {
+    const btn = document.createElement("button");
+    btn.id = "continue"; btn.textContent = "Continue to sign in";
+    btn.addEventListener("click", () => { btn.disabled = true; resolve(); });
+    box.after(btn);
+  });
+}
+
 async function run() {
   let cfg;
   try {
@@ -18,7 +41,8 @@ async function run() {
   const pca = new msal.PublicClientApplication({
     auth: {
       clientId: cfg.clientId,
-      authority: `https://login.microsoftonline.com/${cfg.tenantId}`,
+      // From the server (#91): home tenant, or "common" in open signup.
+      authority: cfg.authority || `https://login.microsoftonline.com/${cfg.tenantId}`,
       redirectUri: window.location.origin + "/auth-dialog.html",
     },
     cache: { cacheLocation: "localStorage" },
@@ -30,6 +54,7 @@ async function run() {
       Office.context.ui.messageParent(JSON.stringify({ ok: true }));
       return;
     }
+    await confirmAfterLegalLinks(cfg);
     await pca.loginRedirect({ scopes: [`api://${cfg.clientId}/access_as_user`] });
     // loginRedirect navigates away; nothing runs past this line until
     // the browser comes back here and handleRedirectPromise() (above)

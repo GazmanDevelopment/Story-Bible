@@ -56,6 +56,9 @@ keeps behaving exactly as before with no other change required).
                     open (any Microsoft account; AUTH_MODE=entra only; ALLOWED_OIDS
                     optional) (#90)
   BLOCKED_TENANTS   open mode: comma-separated tenant ids refused with 403 (#90)
+  PRIVACY_URL, TERMS_URL
+                    optional https links to the privacy policy / terms, shown
+                    on the signed-out pane and sign-in dialog (#91)
   ADMIN_OIDS        comma-separated Entra object ids of the administrators who
                     get the pane's Admin view (users, usage, blocking). Object
                     ids only, never emails - with open signup an email claim
@@ -78,6 +81,7 @@ import logging
 import os
 import sqlite3
 import sys
+from urllib.parse import urlparse
 import threading
 import time
 import uuid
@@ -951,18 +955,34 @@ class ConfigOut(BaseModel):
     authMode: str
     tenantId: str
     clientId: str
+    authority: str = ""     # the MSAL authority to sign in against (#91); "" outside entra mode
+    privacyUrl: str = ""    # optional legal links shown before first sign-in
+    termsUrl: str = ""
+
+
+def _https_url(name: str) -> str:
+    """An optional env-configured link, only ever a well-formed https URL: it is
+    rendered as an href in the pane, so javascript:, data:, a bare "https://"
+    or anything with whitespace is dropped."""
+    v = os.environ.get(name, "").strip()
+    u = urlparse(v)
+    return v if u.scheme == "https" and u.netloc and not any(ch.isspace() for ch in v) else ""
 
 
 @app.get("/api/config", tags=["auth"], response_model=ConfigOut)
 def get_config():
     """Public (no auth) - the pane needs this before it has any way to
     authenticate, to know *how* to sign in (#13). Only ever the tenant/
-    client id, both already public in the app's own manifest/redirect URIs
-    - nothing here is a secret."""
+    client id, authority and the public legal links, all already public in the
+    app's own manifest/redirect URIs - nothing here is a secret."""
+    entra = auth.AUTH_MODE == "entra"
     return {
         "authMode": auth.AUTH_MODE,
         "tenantId": auth.ENTRA_TENANT_ID,
         "clientId": auth.ENTRA_CLIENT_ID,
+        "authority": auth.authority() if entra else "",
+        "privacyUrl": _https_url("PRIVACY_URL"),
+        "termsUrl": _https_url("TERMS_URL"),
     }
 
 
