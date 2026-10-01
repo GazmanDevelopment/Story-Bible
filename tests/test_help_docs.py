@@ -88,3 +88,14 @@ def test_favicons_present_and_referenced():
         rels = {link.get("rel") for link in _scan(page).links}
         assert {"icon", "apple-touch-icon"} <= rels, page.name
     assert 'rel="icon"' in APP_HTML
+
+
+def test_screenshots_script_covers_every_guide_image():
+    """Every image the guide uses is one make_help_screenshots.py writes."""
+    script = (ROOT / "scripts" / "make_help_screenshots.py").read_text(encoding="utf-8")
+    imgs = _scan(DOCS / "help" / "index.html").imgs
+    assert imgs
+    for img in imgs:
+        name = Path(img["src"]).stem
+        assert (DOCS / "help" / img["src"]).exists()
+        assert f'"{name}"' in script, f"{name} is not produced by the screenshots script"
