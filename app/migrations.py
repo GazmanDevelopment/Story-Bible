@@ -113,6 +113,13 @@ def _v6_blocked_users(con: sqlite3.Connection) -> None:
     )
 
 
+def _v7_users_tid(con: sqlite3.Connection) -> None:
+    """#90: the tenant a person signed in from (Entra `tid`). Empty for rows
+    written before open signup. `oid` stays the primary key; tid is recorded
+    for administration and so ownership checks can tell tenants apart."""
+    con.execute("ALTER TABLE users ADD COLUMN tid TEXT NOT NULL DEFAULT ''")
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
@@ -121,6 +128,7 @@ MIGRATIONS: list[Migration] = [
     _v4_concurrency_and_audit,
     _v5_access_indexes,
     _v6_blocked_users,
+    _v7_users_tid,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

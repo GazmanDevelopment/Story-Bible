@@ -87,8 +87,8 @@ def test_the_row_is_refreshed_once_the_interval_has_passed(monkeypatch):
     c.get("/api/me", headers=_as("perf-c"))
     first = _last_seen("perf-c")
     key = (main.DB_PATH, "perf-c")
-    email, name, stamp = main._seen_users[key]
-    main._seen_users[key] = (email, name, stamp - main.LAST_SEEN_REFRESH_SECONDS - 1)
+    email, name, tid, stamp = main._seen_users[key]
+    main._seen_users[key] = (email, name, tid, stamp - main.LAST_SEEN_REFRESH_SECONDS - 1)
     time.sleep(0.02)
     c.get("/api/me", headers=_as("perf-c"))
     assert _last_seen("perf-c") > first

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 
 import jwt
@@ -65,8 +66,23 @@ ADMIN_OIDS = {x.strip().lower() for x in os.environ.get("ADMIN_OIDS", "").split(
 if any(ch in oid for oid in ADMIN_OIDS for ch in "*@ \t"):
     raise RuntimeError("ADMIN_OIDS must be a comma-separated list of Entra object ids (not emails or '*')")
 
+# #90: "allowlist" (default) is today's behaviour - one home tenant, ALLOWED_OIDS
+# required. "open" accepts tokens from any Entra tenant and personal Microsoft
+# accounts (via the multi-tenant "common" authority); see resolve_entra_user.
+SIGNUP_MODE = os.environ.get("SIGNUP_MODE", "allowlist").strip().lower()
+_GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Tenant ids refused outright in open mode (403). Lower-cased: tid claims are
+# GUIDs but case is not something to rely on.
+BLOCKED_TENANTS = {x.strip().lower() for x in os.environ.get("BLOCKED_TENANTS", "").split(",") if x.strip()}
+if any(not _GUID_RE.match(t) for t in BLOCKED_TENANTS):
+    raise RuntimeError("BLOCKED_TENANTS must be a comma-separated list of tenant ids (GUIDs)")
+
 if AUTH_MODE not in ("none", "token", "entra"):
     raise RuntimeError(f"AUTH_MODE must be 'none', 'token' or 'entra', got {AUTH_MODE!r}")
+if SIGNUP_MODE not in ("allowlist", "open"):
+    raise RuntimeError(f"SIGNUP_MODE must be 'allowlist' or 'open', got {SIGNUP_MODE!r}")
+if SIGNUP_MODE == "open" and AUTH_MODE != "entra":
+    raise RuntimeError("SIGNUP_MODE=open requires AUTH_MODE=entra")
 if AUTH_MODE == "entra" and not (ENTRA_TENANT_ID and ENTRA_CLIENT_ID):
     raise RuntimeError("AUTH_MODE=entra requires ENTRA_TENANT_ID and ENTRA_CLIENT_ID")
 if AUTH_MODE == "token" and not TOKEN:
@@ -76,11 +92,17 @@ if AUTH_MODE == "token" and not TOKEN:
     # while /api/health and /api/config both report auth as "on".
     raise RuntimeError("AUTH_MODE=token requires STORYBIBLE_TOKEN to be set")
 
-if AUTH_MODE == "entra" and not ALLOWED_OIDS and _RAW_ALLOWED_OIDS != "*":
+# Open signup has no allowlist by design, so it's optional there (and still
+# enforced if given).
+if AUTH_MODE == "entra" and SIGNUP_MODE == "allowlist" and not ALLOWED_OIDS and _RAW_ALLOWED_OIDS != "*":
     raise RuntimeError(
         "AUTH_MODE=entra requires ALLOWED_OIDS (comma-separated Entra object ids), "
         "or ALLOWED_OIDS=* to deliberately allow everyone Entra itself lets in"
     )
+if SIGNUP_MODE == "open" and not _GUID_RE.match(ENTRA_TENANT_ID.lower()):
+    # The home tenant is compared against tokens' tid (pipeline role, legacy
+    # claim, admins), so a domain name or "common" here would silently refuse them.
+    raise RuntimeError("SIGNUP_MODE=open requires ENTRA_TENANT_ID to be the home tenant's id (a GUID)")
 PIPELINE_ROLE = "Pipeline.Read"
 USER_SCOPE = "access_as_user"
 
@@ -91,6 +113,9 @@ class CurrentUser:
     email: str
     display_name: str
     is_pipeline: bool = False
+    # Home tenant of the sign-in (#90). Empty for the auth-free sentinels.
+    # Together with oid it identifies a person; oid alone stays the primary key.
+    tid: str = ""
 
 
 # Sentinel identities for the two auth-free modes - stable so created_by/
@@ -107,12 +132,23 @@ SHARED_USER = CurrentUser(oid="shared", email="", display_name="Shared token", i
 SYSTEM_USER = CurrentUser(oid="system", email="", display_name="Story Bible (system)", is_pipeline=True)
 
 
+def is_home_tenant(tid: str) -> bool:
+    return bool(tid) and tid.lower() == ENTRA_TENANT_ID.lower()
+
+
 def jwks_url() -> str:
-    return f"https://login.microsoftonline.com/{ENTRA_TENANT_ID}/discovery/v2.0/keys"
+    # Open mode: tokens come from any tenant, and "common" serves the signing
+    # keys for all of them.
+    authority = "common" if SIGNUP_MODE == "open" else ENTRA_TENANT_ID
+    return f"https://login.microsoftonline.com/{authority}/discovery/v2.0/keys"
 
 
-def issuer() -> str:
-    return f"https://login.microsoftonline.com/{ENTRA_TENANT_ID}/v2.0"
+def issuer(tid: str | None = None) -> str:
+    """Expected `iss`. Allowlist mode: always the home tenant. Open mode: the
+    tenant the token itself claims (`tid`), so the caller must have verified
+    the signature first - see resolve_entra_user."""
+    tenant = tid if (SIGNUP_MODE == "open" and tid) else ENTRA_TENANT_ID
+    return f"https://login.microsoftonline.com/{tenant}/v2.0"
 
 
 _jwks_client: PyJWKClient | None = None
@@ -151,6 +187,7 @@ def resolve_entra_user(token: str) -> CurrentUser:
     AuthError(403) for a token that's valid but lacks the required scope/
     role, or (for a real person) isn't on ALLOWED_OIDS. Never logs the
     token itself, only the failure reason."""
+    open_mode = SIGNUP_MODE == "open"
     try:
         signing_key = _get_jwks_client().get_signing_key_from_jwt(token).key
         claims = jwt.decode(
@@ -158,13 +195,27 @@ def resolve_entra_user(token: str) -> CurrentUser:
             signing_key,
             algorithms=["RS256"],
             audience=ENTRA_CLIENT_ID,
-            issuer=issuer(),
+            # Open mode can't know the issuer until the signature is verified
+            # (it embeds the tenant), so it's checked just below instead.
+            issuer=None if open_mode else issuer(),
             leeway=60,
-            options={"require": ["exp", "iat", "aud", "iss"]},
+            options={"require": ["exp", "iat", "aud", "iss"], "verify_iss": not open_mode},
         )
     except jwt.PyJWTError as e:
         logger.warning("entra auth failed: %s", e)
         raise AuthError(401, "Invalid or expired token") from e
+
+    tid = str(claims.get("tid") or "").lower()
+    if open_mode:
+        # tid comes from a signature-verified token. Requiring iss to be exactly
+        # that tenant's v2 issuer rejects v1 tokens and any token whose
+        # issuer and tenant disagree.
+        if not _GUID_RE.match(tid) or claims.get("iss") != issuer(tid):
+            logger.warning("entra auth failed: issuer does not match the token's tenant")
+            raise AuthError(401, "Invalid or expired token")
+        if tid in BLOCKED_TENANTS:
+            logger.warning("entra auth failed: tenant %s is blocked", tid)
+            raise AuthError(403, "Not authorized")
 
     if not claims.get("oid"):
         # An empty oid would compare equal to the "ownerless" marker
@@ -182,15 +233,24 @@ def resolve_entra_user(token: str) -> CurrentUser:
         raise AuthError(403, "Token missing required scope or role")
 
     if is_pipeline:
-        return CurrentUser(oid=claims["oid"], email="", display_name="Review pipeline", is_pipeline=True)
+        # App roles are assigned per tenant, so in open mode an admin of any
+        # other tenant could give their own principal Pipeline.Read and read
+        # every series. Only the home tenant's pipeline is ours.
+        if open_mode and not is_home_tenant(tid):
+            logger.warning("entra auth failed: pipeline role from a foreign tenant")
+            raise AuthError(403, "Not authorized")
+        return CurrentUser(oid=claims["oid"], email="", display_name="Review pipeline", is_pipeline=True, tid=tid)
 
     oid = claims.get("oid", "")
     if ALLOWED_OIDS and oid not in ALLOWED_OIDS:
         logger.warning("entra auth failed: oid not on ALLOWED_OIDS")
         raise AuthError(403, "Not authorized")
+    # name / preferred_username / email are DISPLAY-ONLY: in open mode a foreign
+    # tenant (or a personal account) controls them, so they must never be used
+    # to decide who someone is or what they may do. Identity is oid (+ tid).
     display_name = claims.get("name") or claims.get("preferred_username") or oid
     email = claims.get("preferred_username") or claims.get("email") or ""
-    return CurrentUser(oid=oid, email=email, display_name=display_name, is_pipeline=False)
+    return CurrentUser(oid=oid, email=email, display_name=display_name, is_pipeline=False, tid=tid)
 
 
 def bearer_token(authorization: str | None) -> str:
