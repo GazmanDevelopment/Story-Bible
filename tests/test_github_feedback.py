@@ -325,10 +325,10 @@ def test_a_refund_frees_the_global_ceiling_too(monkeypatch):
 
 
 def test_the_shipped_limiter_has_a_per_person_and_an_overall_cap():
-    assert feedback.RATE_LIMIT_MAX_CALLS == 5 and feedback.RATE_LIMIT_GLOBAL_MAX_CALLS == 20
+    assert feedback.RATE_LIMIT_MAX_CALLS == 5 and feedback.RATE_LIMIT_GLOBAL_MAX_CALLS == 60
     fresh = feedback._RateLimiter(feedback.RATE_LIMIT_MAX_CALLS, feedback.RATE_LIMIT_WINDOW_SECONDS,
                                   feedback.RATE_LIMIT_GLOBAL_MAX_CALLS)
-    assert fresh.max_calls == 5 and fresh.global_max_calls == 20
+    assert fresh.max_calls == 5 and fresh.global_max_calls == 60
 
 
 def test_concurrent_requests_cannot_overshoot_the_cap(monkeypatch):
