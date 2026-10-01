@@ -8,8 +8,8 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_JS = (ROOT / "app" / "static" / "app.js").read_text()
-STYLES_CSS = (ROOT / "app" / "static" / "styles.css").read_text()
+APP_JS = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+STYLES_CSS = (ROOT / "app" / "static" / "styles.css").read_text(encoding="utf-8")
 
 REQUIRED_FIELD_CALLS = [
     'field("name", "Name", c.name, "text", "", true)',

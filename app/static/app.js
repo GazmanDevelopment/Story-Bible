@@ -863,7 +863,7 @@ function accountView() {
     <div class="hint">Nightly backups keep a copy for a few days before it ages out. Feedback you filed is public on GitHub and can't be removed from here.</div>
     <label><span>${S.me?.email ? "Type your email address to confirm" : "Type DELETE to confirm"}</span>
       <input id="deleteConfirm" type="text" autocomplete="off" value=""></label>
-    <button type="button" class="danger" data-act="delete-account">Delete my account and data</button>`;
+    <button type="button" class="danger" data-act="delete-account">Delete my account and data</button>${legalLinksHtml()}`;
 }
 async function loadAdminUsers() {
   S.adminError = null;
@@ -1171,7 +1171,8 @@ async function loadApp() {
 }
 
 // Privacy / terms links under Sign in, so they are visible before anyone's first
-// sign-in. Only https URLs are ever rendered (the server filters too).
+// sign-in, and at the foot of the Account view once signed in (#112). Only
+// https URLs are ever rendered (the server filters too).
 function legalLinksHtml() {
   const links = [["Privacy policy", S.config.privacyUrl], ["Terms of use", S.config.termsUrl]]
     .filter(([, url]) => /^https:\/\//i.test(url || ""))
