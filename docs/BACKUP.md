@@ -56,6 +56,24 @@ can read the files. The app creates the folders `0700` and the files `0600`
 machine - it is not encryption, and it says nothing about whoever administers
 the NAS (`SECURITY.md` records that as accepted).
 
+## Backups hold other people's data: retention and erasure
+
+With open signup (#85) the database, and so every backup, contains other
+people's names, emails and story content. The rule for erasure (#86, #100):
+
+- When someone deletes their account, their data is removed from the live
+  database immediately. **It stays in existing backups until they age out**
+  after `BACKUP_KEEP_DAYS` (default 14 days), and in any ZFS snapshots or
+  off-box copies you keep - so those retention periods are part of the
+  "how long do you keep my data" answer in the privacy policy. Don't keep
+  off-box copies longer than you are willing to state there.
+- Backups are never edited to remove a deleted account; they just expire.
+- **A restore must not resurrect deleted accounts.** The live database keeps
+  a tombstone (oid and deletion time only) for every deleted account; after
+  restoring, re-apply those deletions - see [RESTORE.md](RESTORE.md).
+- Shortening `BACKUP_KEEP_DAYS` shortens the window, at the cost of less
+  history to restore from.
+
 ## TrueNAS: snapshot the dataset too, and copy it off the box
 
 A periodic ZFS snapshot task on the app's dataset (e.g. `tank/apps/storybible`,

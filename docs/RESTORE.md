@@ -33,6 +33,34 @@ directly).
 7. Once you're confident it's correct, remove the `.before-restore` file
    from step 3.
 
+## Account deletions and restores
+
+*Applies once account deletion (#86) is released; before that there are no
+deletions to re-apply.*
+
+A backup is older than the live database, so it can contain people who have
+since deleted their account (the right to erasure), and restoring it would
+bring their data back. The live database records every deletion in a
+`deleted_users` table (oid and deletion time only), and blocks in
+`blocked_users` (#82).
+
+1. **Before step 3 above**, while the live database is still in place (so its
+   WAL is intact), save both lists:
+   ```
+   sqlite3 /data/storybible.db "SELECT oid, deleted_at FROM deleted_users" > /data/deleted-users.txt
+   sqlite3 /data/storybible.db "SELECT * FROM blocked_users" > /data/blocked-users.txt
+   ```
+2. **Between steps 5 and 6** (the app is still stopped), for each oid in
+   `deleted-users.txt` remove the account from the restored database using
+   the same function the app's "Delete my account" uses (`delete_account_data`
+   in `app/main.py`; this also re-creates the tombstone), and re-insert any
+   missing `blocked_users` rows so a blocked person stays blocked.
+3. Only then start the app, so a restored database never serves traffic with
+   deleted accounts in it.
+
+Record the restore (date, which backup, which accounts were re-deleted) - if
+a person asks, you need to be able to show their erasure held.
+
 ## Restore from a JSON export
 
 Each file under `/data/backups/json/<date>/` is one series, in the same
