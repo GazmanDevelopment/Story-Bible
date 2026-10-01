@@ -155,6 +155,11 @@ to show privacy and terms links before first sign-in. After changing
 `SIGNUP_MODE`, people who are already signed in should sign out and back in,
 because their cached account belongs to the old authority.
 
+After signing in, each person must accept the privacy policy and terms
+(`POLICY_VERSION`, default `1.0`, must match the version shown on the legal
+pages). When you change the pages, bump `POLICY_VERSION` and everyone is asked
+to accept again (#111).
+
 ### Going live with open signup (#85, #92)
 
 Don't set `SIGNUP_MODE=open` until the go-live checklist in `PLAN.md`

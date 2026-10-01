@@ -197,7 +197,7 @@ async function initAuth() {
   try {
     S.config = await (await fetch("/api/config")).json();
   } catch {
-    S.config = { authMode: "none", tenantId: "", clientId: "", authority: "", privacyUrl: "", termsUrl: "" };  // server unreachable - boot()'s own error state takes it from here
+    S.config = { authMode: "none", tenantId: "", clientId: "", authority: "", privacyUrl: "", termsUrl: "", policyVersion: "" };  // server unreachable - boot()'s own error state takes it from here
   }
   if (S.config.authMode !== "entra") return;
   const msalConfig = {
@@ -394,9 +394,22 @@ function renderHeader() {
     : `<span>This document isn't linked.</span><button class="small" data-act="doc-link">Link to this series</button>`;
 }
 
+// Signed in but not yet accepted the current privacy policy and terms (#111):
+// the pane shows only the acceptance screen until they do.
+function policyGateNeeded() {
+  return S.config?.authMode === "entra" && !!S.me && S.me.policyCurrent === false;
+}
+
+function policyGateHtml() {
+  return `<div class="empty policy-gate"><strong>Before you continue</strong><br><br>
+    By continuing you accept the terms and the privacy policy.${legalLinksHtml()}<br>
+    <button class="primary" data-act="accept-policy">Accept and continue</button></div>`;
+}
+
 function render() {
   renderHeader();
   const m = $("#main");
+  if (policyGateNeeded()) { m.innerHTML = policyGateHtml(); S.formSnapshot = null; return; }
   // Checked before the "no series" empty state below, not after: feedback
   // doesn't need a series to exist (it isn't tied to S.b at all), and if
   // it were gated behind having one, a user hitting a bug that prevents
@@ -968,6 +981,10 @@ async function onClick(ev) {
       case "import-pick": $("#importFile").click(); break;
       case "save-token": lsSet("sb_token", $("#tokenInput").value.trim()); await boot(); toast("Token saved"); break;
       case "sign-in": await signIn(); if (msalAccount) { await loadApp(); } else { renderHeader(); } break;
+      case "accept-policy":
+        S.me = await api("/me/accept-policy", "POST", { version: S.config.policyVersion });
+        await loadApp();
+        break;
       case "sign-out": await signOut(); S.b = null; S.me = null; S.view = null; S.seriesList = []; render(); break;
       case "open-account": S.view = { kind: "account", id: null }; render(); break;
       case "download-my-data": {
@@ -1140,6 +1157,7 @@ function wire() {
 async function loadApp() {
   try {
     await loadMe();
+    if (policyGateNeeded()) { render(); return; }
     await loadSeriesList();
     await readDocLink();
     const want = (S.docLink && S.docLink.series_id) || lsGet("sb_series");

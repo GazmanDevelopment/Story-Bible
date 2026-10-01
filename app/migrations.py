@@ -132,6 +132,14 @@ def _v8_deleted_users(con: sqlite3.Connection) -> None:
     )
 
 
+def _v9_policy_acceptance(con: sqlite3.Connection) -> None:
+    """#111: which version of the privacy policy and terms a person accepted,
+    and when. Empty / 0 until they accept; compared with POLICY_VERSION so a
+    version bump asks everyone again."""
+    con.execute("ALTER TABLE users ADD COLUMN policy_version TEXT NOT NULL DEFAULT ''")
+    con.execute("ALTER TABLE users ADD COLUMN policy_accepted_at REAL NOT NULL DEFAULT 0")
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
@@ -142,6 +150,7 @@ MIGRATIONS: list[Migration] = [
     _v6_blocked_users,
     _v7_users_tid,
     _v8_deleted_users,
+    _v9_policy_acceptance,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
