@@ -5,7 +5,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
-PAGES = [DOCS / "index.html", DOCS / "help" / "index.html"]
+LEGAL = [DOCS / "privacy.html", DOCS / "terms.html"]
+PAGES = [DOCS / "index.html", DOCS / "help" / "index.html", *LEGAL]
 APP_JS = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
 APP_HTML = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
 
@@ -116,3 +117,35 @@ def test_screenshots_script_covers_every_guide_image():
         name = Path(img["src"]).stem
         assert (DOCS / "help" / img["src"]).exists()
         assert f'"{name}"' in script, f"{name} is not produced by the screenshots script"
+
+
+def test_legal_pages_have_version_and_contact():
+    """The privacy policy and terms show a version and give the contact address."""
+    for page in LEGAL:
+        text = page.read_text(encoding="utf-8")
+        assert re.search(r"Version \d+\.\d+, effective \d{1,2} \w+ \d{4}", text), page.name
+        assert "gazman.development@gmail.com" in text, page.name
+        assert not re.search(r"#\d+", text), f"{page.name}: issue number in user-facing text"
+
+
+def test_privacy_policy_covers_required_topics():
+    text = (DOCS / "privacy.html").read_text(encoding="utf-8").lower()
+    for needle in ("uk gdpr", "gareth huscroft", "admin dashboard", "github", "local storage",
+                   "14 days", "18, 20 and 23 months", "24 months", "no usable email",
+                   "information commissioner", "72 hours", "at least 16", "erasure",
+                   "portability", "restrict", "object", "rectification"):
+        assert needle in text, f"privacy policy lacks {needle!r}"
+
+
+def test_terms_cover_required_topics():
+    text = (DOCS / "terms.html").read_text(encoding="utf-8").lower()
+    for needle in ("acceptable use", "without any promise", "block", "keep ownership"):
+        assert needle in text, f"terms lack {needle!r}"
+
+
+def test_guide_and_readme_link_to_legal_pages():
+    guide = (DOCS / "help" / "index.html").read_text(encoding="utf-8")
+    assert 'href="../privacy.html"' in guide and 'href="../terms.html"' in guide
+    assert "being finalised" not in guide
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "docs/privacy.html" in readme and "docs/terms.html" in readme
