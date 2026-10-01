@@ -71,6 +71,10 @@ Nightly backups (VACUUM INTO + a JSON export per series) run in-process -
 see app/backup.py for BACKUP_DIR/BACKUP_KEEP_DAYS/BACKUP_HOUR and the
 manual `python -m app.backup` entry point.
 
+Inactive accounts (#113) are emailed and then deleted by a daily job - see
+app/retention.py (INACTIVE_DELETE_MONTHS, INACTIVE_NOTICE_MONTHS,
+RETENTION_HOUR) and app/mailer.py (SMTP_*).
+
 "Log Issue"/"Log Suggestion" in the pane file a GitHub issue directly -
 see app/github_feedback.py for GITHUB_FEEDBACK_TOKEN (#22).
 """
@@ -106,6 +110,7 @@ from . import __version__
 from . import auth
 from . import backup as backup_mod
 from . import github_feedback as feedback_mod
+from . import retention as retention_mod
 from .migrations import migrate
 from .models import KIND_MODELS, MAX_ID, MAX_SHORT, REF_FIELDS, SeriesIn
 
@@ -408,7 +413,8 @@ def upsert_user(con: sqlite3.Connection, user: auth.CurrentUser) -> bool:
     row = con.execute("SELECT oid FROM users WHERE oid=?", (user.oid,)).fetchone()
     if row:
         con.execute(
-            "UPDATE users SET email=?, display_name=?, tid=?, last_seen=? WHERE oid=?",
+            # Back again, so any inactive-account notices start over (#113).
+            "UPDATE users SET email=?, display_name=?, tid=?, last_seen=?, inactive_notice_stage=0 WHERE oid=?",
             (user.email, user.display_name, user.tid, now, user.oid),
         )
         return False
@@ -552,15 +558,19 @@ WRITE_LIMIT = [Depends(limit_writes)]
 # -------------------------------------------------------------------------- app
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Starts the nightly backup scheduler (#5) alongside the server, and
-    cancels it cleanly on shutdown. Not triggered by TestClient(app) used
+    """Starts the nightly backup scheduler (#5) and the inactive-account
+    retention job (#113) alongside the server, and cancels them cleanly on
+    shutdown. Not triggered by TestClient(app) used
     without a `with` block - i.e. not during this repo's existing tests -
     since that's how the ASGI lifespan protocol works; only a real server
     (uvicorn) or `with TestClient(app) as c:` sends the startup/shutdown
     messages that invoke this."""
-    task = asyncio.create_task(backup_mod.scheduler())
+    retention_mod.startup_check()
+    tasks = [asyncio.create_task(backup_mod.scheduler()),
+             asyncio.create_task(retention_mod.scheduler())]   # #113
     yield
-    task.cancel()
+    for task in tasks:
+        task.cancel()
     # If the scheduler is mid-backup, it's inside asyncio.to_thread(), which
     # cancellation can't interrupt - only the *next* `await` in that thread
     # would raise, and there isn't one until the thread returns. Bounding
@@ -568,10 +578,11 @@ async def lifespan(app: FastAPI):
     # it doesn't force the worker thread to stop (Python still joins
     # non-daemon executor threads at process exit either way), just caps
     # what this function itself waits for.
-    try:
-        await asyncio.wait_for(task, timeout=5)
-    except (asyncio.CancelledError, TimeoutError):
-        pass
+    for task in tasks:
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except (asyncio.CancelledError, TimeoutError):
+            pass
 
 
 # #45: grouping/descriptions for the Swagger UI (/docs) and ReDoc (/redoc)

@@ -28,7 +28,8 @@ def test_update_sh_is_valid_posix_shell():
 def test_env_example_has_no_populated_secrets():
     """A safeguard against accidentally committing a real token/id into the
     example someone copies into their own .env."""
-    secret_keys = {"STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS"}
+    secret_keys = {"STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS",
+                   "SMTP_USER", "SMTP_PASSWORD"}
     for line in (ROOT / ".env.example").read_text().splitlines():
         line = line.strip()
         if line.startswith("#") or "=" not in line:
@@ -78,7 +79,7 @@ def test_compose_yaml_has_no_real_secrets_or_identifiers():
     anyone who has seen this public repo could authenticate with."""
     text = (ROOT / "deploy" / "compose.yaml.example").read_text()
     for key in ("STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS",
-                "FORWARDED_ALLOW_IPS", "GITHUB_FEEDBACK_TOKEN"):
+                "FORWARDED_ALLOW_IPS", "GITHUB_FEEDBACK_TOKEN", "SMTP_USER", "SMTP_PASSWORD"):
         assert re.search(rf'^\s*{key}: ""\s*$', text, re.MULTILINE), f'{key} is not blank ("") in compose.yaml.example'
 
 @pytest.mark.parametrize("path", ["deploy/compose.yaml", "deploy/compose.yaml.bak"])

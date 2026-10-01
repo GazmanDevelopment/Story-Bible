@@ -183,6 +183,58 @@ Redeploy, then check `/api/config` reports the `common` authority. To roll
 back set `SIGNUP_MODE: "allowlist"` again; accounts already created are kept
 and `ALLOWED_OIDS` applies again.
 
+### Inactive accounts and outgoing mail (#113)
+
+In `AUTH_MODE=entra` a daily job (at `RETENTION_HOUR`, default 4am) deletes
+accounts nobody has signed in to for `INACTIVE_DELETE_MONTHS` (default 24)
+and emails the owner first at each of `INACTIVE_NOTICE_MONTHS` (default
+18, 20 and 23). Administrators (`ADMIN_OIDS`) are never deleted. Accounts
+with no usable email address, and every account while mail is not set up,
+are still deleted on schedule; only the emails are skipped. Each deletion
+writes a tombstone like a self-service one ([docs/BACKUP.md](../docs/BACKUP.md)).
+The defaults are what the privacy policy states: change both together.
+`INACTIVE_DELETE_MONTHS=0` turns the job off.
+
+The emails need an SMTP account. With `SMTP_HOST`, `SMTP_USER` or
+`SMTP_PASSWORD` missing, the startup log shows a "mail disabled" warning.
+Each run logs how many notices were sent and accounts deleted.
+
+#### Gmail app password (do this before the first deploy)
+
+Use a dedicated sender mailbox, not a personal account. Gmail caps SMTP at
+about 500 messages a day, far more than this needs.
+
+1. Sign in to the Google account that will send the mail.
+2. Turn on 2-Step Verification: Google Account → Security → 2-Step
+   Verification. App passwords are not offered without it.
+3. Open <https://myaccount.google.com/apppasswords>. If the page is missing,
+   2-Step Verification is not fully on, or the account is Workspace-managed
+   and the admin has blocked app passwords.
+4. Enter an app name such as `Story Bible server` and click **Create**.
+5. Copy the 16-character password. Google shows it once. The spaces are
+   cosmetic, so remove them.
+6. In `deploy/compose.yaml` (never in git):
+   ```yaml
+   SMTP_HOST: "smtp.gmail.com"
+   SMTP_PORT: "587"
+   SMTP_USER: "<sender>@gmail.com"
+   SMTP_PASSWORD: "<16-char app password>"
+   SMTP_FROM: "Story Bible <sender@gmail.com>"
+   ```
+   Gmail rewrites the From address to the signed-in account unless a "Send
+   mail as" alias is set up, so keep the address in `SMTP_FROM` the same as
+   `SMTP_USER`. Port 465 (implicit TLS) also works; 587 uses STARTTLS.
+7. Redeploy. The "mail disabled" warning should no longer be in the log.
+8. **Smoke test** inside the container:
+   `python -c "from app import mailer; print(mailer.send('<your address>', 'Test', 'Hello'))"`
+   should print `True` and the mail should arrive (check spam).
+9. **Rotating or revoking**: delete the app password on the same Google page.
+   Mail then fails, is logged and is retried the next day; deletions still
+   happen on schedule. Changing the Google account's password also revokes
+   app passwords. Create a new one and update `SMTP_PASSWORD`.
+
+The password is never logged or returned by the API.
+
 ### Administrators: viewing and blocking users (#82)
 
 Set `ADMIN_OIDS` to a comma-separated list of the Entra object ids of the
