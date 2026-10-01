@@ -67,9 +67,18 @@ people's names, emails and story content. The rule for erasure (#86, #100):
   off-box copies you keep - so those retention periods are part of the
   "how long do you keep my data" answer in the privacy policy. Don't keep
   off-box copies longer than you are willing to state there.
+- **Inactive accounts are deleted the same way** (#113): an account nobody
+  has signed in to for `INACTIVE_DELETE_MONTHS` (default 24) is removed by a
+  daily job at `RETENTION_HOUR` (default 4am, after the backup), after email
+  notices at `INACTIVE_NOTICE_MONTHS` (default 18, 20 and 23 months). It
+  writes the same tombstone, so it is covered by the restore step below, and
+  the account stays in backups until they age out like any other deletion.
+  See `app/retention.py` and the mail setup in
+  [deploy/README.md](../deploy/README.md).
 - Backups are never edited to remove a deleted account; they just expire.
 - **A restore must not resurrect deleted accounts.** The live database keeps
-  a tombstone (oid and deletion time only) for every deleted account; after
+  a tombstone (oid and deletion time only) for every deleted account,
+  whether the person deleted it or it was deleted for inactivity; after
   restoring, re-apply those deletions - see [RESTORE.md](RESTORE.md).
 - Shortening `BACKUP_KEEP_DAYS` shortens the window, at the cost of less
   history to restore from.

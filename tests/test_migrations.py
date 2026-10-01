@@ -164,3 +164,16 @@ def test_v9_adds_policy_acceptance_columns_and_upgrades_a_v8_database():
     assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 9
     assert con.execute("SELECT policy_version, policy_accepted_at FROM users WHERE oid='u'").fetchone() == ("", 0)
     con.close()
+
+
+def test_v10_adds_inactive_notice_stage_and_upgrades_a_v9_database():
+    """#113: existing users start at stage 0 - no inactive-account notice sent yet."""
+    from app.migrations import MIGRATIONS
+    con = _new_db()
+    for v in range(1, 10):
+        con.execute("BEGIN IMMEDIATE"); MIGRATIONS[v - 1](con); con.execute(f"PRAGMA user_version = {v}"); con.commit()
+    con.execute("INSERT INTO users (oid, first_seen, last_seen) VALUES ('u', 0, 0)")
+    migrate(con)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 10
+    assert con.execute("SELECT inactive_notice_stage FROM users WHERE oid='u'").fetchone() == (0,)
+    con.close()

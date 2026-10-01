@@ -140,6 +140,12 @@ def _v9_policy_acceptance(con: sqlite3.Connection) -> None:
     con.execute("ALTER TABLE users ADD COLUMN policy_accepted_at REAL NOT NULL DEFAULT 0")
 
 
+def _v10_inactive_notice_stage(con: sqlite3.Connection) -> None:
+    """#113: how many inactive-account notices have been emailed to this
+    person since they last signed in (0 = none). Signing in resets it."""
+    con.execute("ALTER TABLE users ADD COLUMN inactive_notice_stage INTEGER NOT NULL DEFAULT 0")
+
+
 # Ordered by version: MIGRATIONS[0] is version 1, MIGRATIONS[1] is version 2, etc.
 MIGRATIONS: list[Migration] = [
     _v1_initial_schema,
@@ -151,6 +157,7 @@ MIGRATIONS: list[Migration] = [
     _v7_users_tid,
     _v8_deleted_users,
     _v9_policy_acceptance,
+    _v10_inactive_notice_stage,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

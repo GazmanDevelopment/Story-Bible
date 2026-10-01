@@ -76,6 +76,15 @@ services:
       FORWARDED_ALLOW_IPS: ""
       # Backup schedule/monitoring (#5/#17) and log timestamps.
       TZ: "Australia/Sydney"
+      # Outgoing mail for the inactive-account notices (#113). Blank = no emails;
+      # accounts are still deleted on schedule. Gmail: an app password, see
+      # deploy/README.md. Retention itself (INACTIVE_DELETE_MONTHS=24,
+      # INACTIVE_NOTICE_MONTHS=18,20,23, RETENTION_HOUR=4) has defaults.
+      SMTP_HOST: ""
+      SMTP_PORT: "587"
+      SMTP_USER: ""
+      SMTP_PASSWORD: ""
+      SMTP_FROM: ""
       # Open signup limits (#89) - see .env.example for what each does:
       #   MAX_USERS (0 = unlimited), MAX_BYTES_PER_OWNER, MAX_SERIES_PER_OWNER,
       #   MAX_RECORDS_PER_SERIES, WRITE_RATE_LIMIT_PER_MINUTE,
