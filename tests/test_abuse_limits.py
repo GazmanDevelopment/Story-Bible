@@ -269,11 +269,89 @@ def test_one_abuser_cannot_exhaust_the_global_feedback_cap():
     assert lim.reserve("someone-else") is not None
 
 
-def test_global_full_reports_which_cap_was_hit():
+def test_person_full_tells_own_cap_from_overall_cap():
     lim = feedback._RateLimiter(5, 3600, 2)
     lim.reserve("a")
     lim.reserve("b")
-    assert lim.reserve("c") is None and lim.global_full()
+    assert lim.reserve("c") is None and not lim.person_full("c")   # only the overall ceiling is full
     per = feedback._RateLimiter(1, 3600, 10)
     per.reserve("a")
-    assert per.reserve("a") is None and not per.global_full()
+    assert per.reserve("a") is None and per.person_full("a")
+
+
+def test_limiter_is_safe_under_concurrent_use():
+    import threading
+    lim = feedback._RateLimiter(50, 60)
+    errors, granted = [], []
+
+    def worker(n):
+        try:
+            for _ in range(200):
+                if lim.reserve(f"k{n % 20}"):
+                    granted.append(1)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(16)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors
+    assert len(granted) == 16 * 50           # 16 distinct keys, exactly the cap each: no lost or extra tickets
+
+
+def test_feedback_limit_env_is_blank_safe_and_never_zero(monkeypatch):
+    monkeypatch.setenv("X_LIMIT", "")
+    assert feedback._env_limit("X_LIMIT", 7) == 7
+    monkeypatch.setenv("X_LIMIT", "0")
+    assert feedback._env_limit("X_LIMIT", 7) == 1
+    monkeypatch.setenv("X_LIMIT", "12")
+    assert feedback._env_limit("X_LIMIT", 7) == 12
+
+
+def test_feedback_429_message_says_which_cap(monkeypatch):
+    monkeypatch.setenv("GITHUB_FEEDBACK_TOKEN", "t")
+    import asyncio
+    body = feedback.validate_feedback({"kind": "issue", "title": "abc", "description": "d"})
+    user = auth.CurrentUser(oid="fb-a", email="a@example.com", display_name="A")
+    monkeypatch.setattr(feedback, "_rate_limiter", feedback._RateLimiter(1, 3600, 5))
+    feedback._rate_limiter.reserve("fb-a")
+    with pytest.raises(feedback.HTTPException) as e:
+        asyncio.run(feedback.file_feedback(body, user))
+    assert "Too many feedback submissions" in e.value.detail
+    monkeypatch.setattr(feedback, "_rate_limiter", feedback._RateLimiter(5, 3600, 1))
+    feedback._rate_limiter.reserve("someone-else")
+    with pytest.raises(feedback.HTTPException) as e:
+        asyncio.run(feedback.file_feedback(body, user))
+    assert "very busy" in e.value.detail
+
+
+# ---------------------------------------------- review follow-ups
+def test_max_users_exempts_the_legacy_owner(monkeypatch):
+    c.get("/api/me", headers=_as("cap-seed2"))
+    monkeypatch.setattr(main, "MAX_USERS", _user_count())
+    monkeypatch.setattr(auth, "LEGACY_OWNER_OID", "legacy-owner-late")
+    main._seen_users.clear()
+    assert c.get("/api/me", headers=_as("legacy-owner-late")).status_code == 200
+    assert c.get("/api/me", headers=_as("not-the-legacy-owner")).status_code == 403
+
+
+def test_storage_ceiling_is_entra_only(monkeypatch):
+    monkeypatch.setattr(auth, "AUTH_MODE", "none")
+    monkeypatch.setattr(main, "MAX_BYTES_PER_OWNER", 10)
+    sid = c.post("/api/series", json={"data": {"name": "shared bible"}}).json()["id"]
+    r = c.post(f"/api/series/{sid}/characters", json={"data": {"name": "c", "notes": "x" * 500}})
+    assert r.status_code == 200
+
+
+def test_every_write_route_has_the_rate_limit():
+    """By construction, not by hand: a new POST/PUT/DELETE /api route that
+    forgets dependencies=WRITE_LIMIT fails here. (/api/feedback has its own,
+    stricter limiter.)"""
+    from fastapi.routing import APIRoute
+    missing = []
+    for r in main.app.routes:
+        if not isinstance(r, APIRoute) or not r.path.startswith("/api/") or r.path == "/api/feedback":
+            continue
+        if r.methods & {"POST", "PUT", "DELETE", "PATCH"}:
+            if main.limit_writes not in [d.call for d in r.dependant.dependencies]:
+                missing.append(f"{sorted(r.methods)} {r.path}")
+    assert not missing, missing

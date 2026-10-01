@@ -14,8 +14,9 @@ Env vars:
                     series / one person can hold (defaults 20000 / 200, #71)
   MAX_USERS         cap on total accounts (default 0 = unlimited). Once reached,
                     a person who has never signed in is refused (403) at their
-                    first request; existing accounts are unaffected (#89)
-  MAX_BYTES_PER_OWNER  storage ceiling per person: the JSON stored in all
+                    first request; existing accounts and LEGACY_OWNER_OID are
+                    unaffected (#89)
+  MAX_BYTES_PER_OWNER  (AUTH_MODE=entra only) storage ceiling per person: the JSON stored in all
                     series they own, shared records included (default
                     500 MiB, 0 = off). Writes that would grow past it get a
                     400; edits that shrink data and deletes always work (#89)
@@ -249,12 +250,17 @@ def check_storage_quota(con, owner_oid: str, adding: int) -> None:
     MAX_BYTES_PER_OWNER (#89). Call inside the write lock, and only for writes
     that grow the data - shrinking an edit or deleting must always work, even
     for someone already over the line."""
-    if MAX_BYTES_PER_OWNER <= 0 or adding <= 0:
+    # Entra only, and never for the unowned ('') pre-auth bucket: in none/token
+    # mode every series belongs to one shared identity, so a "per person"
+    # ceiling would really be a server-wide one. Cost: one SUM over the
+    # owner's rows per growing write - fine at story-bible sizes.
+    if MAX_BYTES_PER_OWNER <= 0 or adding <= 0 or auth.AUTH_MODE != "entra" or not owner_oid:
         return
     used = owner_bytes(con, owner_oid)
     if used + adding > MAX_BYTES_PER_OWNER:
-        raise HTTPException(400, f"Storage limit reached ({used // 1024 // 1024} MiB of "
-                                 f"{MAX_BYTES_PER_OWNER // 1024 // 1024} MiB used by this series' owner)")
+        raise HTTPException(400, f"Storage limit reached ({used // 1024 // 1024} of "
+                                 f"{MAX_BYTES_PER_OWNER // 1024 // 1024} MiB used) - the series' owner "
+                                 "needs to free up space")
 
 
 def iter_refs(kind: str, data: dict):
@@ -442,7 +448,9 @@ def get_current_user(
         # MAX_USERS (#89); uncapped, this stays the cheap lazy transaction.
         with db(write=MAX_USERS > 0) as con:
             if MAX_USERS > 0 and not con.execute("SELECT 1 FROM users WHERE oid=?", (user.oid,)).fetchone():
-                if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] >= MAX_USERS:
+                # (LEGACY_OWNER_OID is exempt: refusing them would strand the pre-sign-in series.)
+                if (user.oid != auth.LEGACY_OWNER_OID
+                        and con.execute("SELECT COUNT(*) FROM users").fetchone()[0] >= MAX_USERS):
                     raise HTTPException(403, "This server is not accepting new accounts right now")
             upsert_user(con, user)
             if (auth.LEGACY_OWNER_OID and user.oid == auth.LEGACY_OWNER_OID
@@ -469,7 +477,7 @@ def require_person(user: auth.CurrentUser = Depends(get_current_user)) -> auth.C
     return user
 
 
-def limit_writes(request: Request, user: auth.CurrentUser = Depends(get_current_user)) -> None:
+def limit_writes(user: auth.CurrentUser = Depends(get_current_user)) -> None:
     """Per-person write rate limit (#89), a dependency on every POST/PUT/DELETE
     route. Only in AUTH_MODE=entra: in none/token there is one shared identity,
     so a "per person" limit would just throttle the one bible. Counted before

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import threading
 import re
 import time
 from typing import Any, Literal
@@ -58,8 +59,16 @@ LABELS: dict[str, list[str]] = {
 # per-person allowance) and lock everyone else out for the hour, so the default
 # leaves room for ~12 people at the per-person cap; MAX_USERS in app/main.py
 # bounds how many accounts there can be at all.
-RATE_LIMIT_MAX_CALLS = int(os.environ.get("FEEDBACK_RATE_LIMIT_PER_PERSON", 5))     # per person, per window
-RATE_LIMIT_GLOBAL_MAX_CALLS = int(os.environ.get("FEEDBACK_RATE_LIMIT_GLOBAL", 60))  # across everyone: bounds the damage from many accounts, or one compromised one
+def _env_limit(name: str, default: int) -> int:
+    """A positive int from the environment; blank/unset gives the default and
+    0 or less is raised to 1 - unlike the main.py limits, "0" can't mean "off"
+    here (this is the only guard on a public-repo write)."""
+    raw = os.environ.get(name, "").strip()
+    return max(1, int(raw)) if raw else default
+
+
+RATE_LIMIT_MAX_CALLS = _env_limit("FEEDBACK_RATE_LIMIT_PER_PERSON", 5)     # per person, per window
+RATE_LIMIT_GLOBAL_MAX_CALLS = _env_limit("FEEDBACK_RATE_LIMIT_GLOBAL", 60)  # across everyone: bounds the damage from many accounts, or one compromised one
 RATE_LIMIT_WINDOW_SECONDS = 3600
 OUTBOUND_TIMEOUT_SECONDS = 10  # must not block the single uvicorn worker for long
 
@@ -125,6 +134,9 @@ class _RateLimiter:
         self._by_key: dict[str, list[tuple[float, int]]] = {}
         self._all: list[tuple[float, int]] = []
         self._seq = itertools.count()
+        # Sync FastAPI routes run on a threadpool (main.py's write limiter), so
+        # the prune/append/refund sequences must not interleave (#89).
+        self._lock = threading.Lock()
 
     def _prune(self, now: float) -> None:
         cutoff = now - self.window_seconds
@@ -138,31 +150,34 @@ class _RateLimiter:
 
     def reserve(self, key: str = "") -> tuple[float, int] | None:
         """A ticket to pass to refund(), or None if `key` (or everyone) is at the cap."""
-        now = time.monotonic()
-        self._prune(now)
-        mine = self._by_key.get(key, [])
-        if len(mine) >= self.max_calls:
-            return None
-        if self.global_max_calls is not None and len(self._all) >= self.global_max_calls:
-            return None
-        ticket = (now, next(self._seq))
-        self._by_key.setdefault(key, []).append(ticket)
-        self._all.append(ticket)
-        return ticket
+        with self._lock:
+            now = time.monotonic()
+            self._prune(now)
+            mine = self._by_key.get(key, [])
+            if len(mine) >= self.max_calls:
+                return None
+            if self.global_max_calls is not None and len(self._all) >= self.global_max_calls:
+                return None
+            ticket = (now, next(self._seq))
+            self._by_key.setdefault(key, []).append(ticket)
+            self._all.append(ticket)
+            return ticket
 
-    def global_full(self) -> bool:
-        """True if the overall ceiling (not the caller's own) is what is full."""
-        self._prune(time.monotonic())
-        return self.global_max_calls is not None and len(self._all) >= self.global_max_calls
+    def person_full(self, key: str = "") -> bool:
+        """True if `key`'s own allowance is used up (as opposed to only the overall ceiling)."""
+        with self._lock:
+            self._prune(time.monotonic())
+            return len(self._by_key.get(key, [])) >= self.max_calls
 
     def refund(self, key: str, ticket: tuple[float, int]) -> None:
-        if ticket in self._all:
-            self._all.remove(ticket)
-        mine = self._by_key.get(key)
-        if mine and ticket in mine:
-            mine.remove(ticket)
-            if not mine:
-                del self._by_key[key]
+        with self._lock:
+            if ticket in self._all:
+                self._all.remove(ticket)
+            mine = self._by_key.get(key)
+            if mine and ticket in mine:
+                mine.remove(ticket)
+                if not mine:
+                    del self._by_key[key]
 
 
 _rate_limiter = _RateLimiter(RATE_LIMIT_MAX_CALLS, RATE_LIMIT_WINDOW_SECONDS, RATE_LIMIT_GLOBAL_MAX_CALLS)
@@ -259,9 +274,9 @@ async def file_feedback(feedback: FeedbackIn, user: auth.CurrentUser | None = No
     feedback.submitted_by = _public_name(user)
     ticket = _rate_limiter.reserve(key)
     if ticket is None:
-        if _rate_limiter.global_full():
-            raise HTTPException(429, "Feedback is very busy right now - try again later")
-        raise HTTPException(429, "Too many feedback submissions - try again later")
+        if _rate_limiter.person_full(key):
+            raise HTTPException(429, "Too many feedback submissions - try again later")
+        raise HTTPException(429, "Feedback is very busy right now - try again later")
     try:
         result = await _post_issue_to_github(token, feedback)
     except BaseException as e:  # BaseException: a cancelled request must give its slot back too
