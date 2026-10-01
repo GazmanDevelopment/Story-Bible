@@ -117,16 +117,48 @@ the domain hosting the app that redirects to it.
 | Setting | Value |
 |---|---|
 | Name | Story Bible |
-| Supported account types | **Single tenant** (see "Your wife's account" below) |
+| Supported account types | **Single tenant** while `SIGNUP_MODE=allowlist` (see "Your wife's account" below). Changed to "any organizational directory and personal Microsoft accounts" for open signup - see "Open signup" below |
 | Platform: Single-page application, redirect URIs | `brk-multihub://storybible.huscroft.com.au` (NAA), `https://storybible.huscroft.com.au` (browser), `https://localhost:3000` (dev), `https://storybible.huscroft.com.au/auth-dialog.html` (perpetual Office without NAA - #13's dialog fallback does a normal redirect flow, so it needs its own exact URL registered too) - the app's own domain, not the tenant's |
 | Expose an API | App ID URI `api://<client-id>`, delegated scope **`access_as_user`** |
 | App role (Application type) | **`Pipeline.Read`**, for the review-pipeline daemon (client credentials, separate app registration with a certificate or secret) |
-| Enterprise app → Properties | **Assignment required = Yes**, then assign only you and your wife. Nobody else in the tenant can get a token. |
+| Enterprise app → Properties | **Assignment required = Yes**, then assign only you and your wife. Nobody else in the tenant can get a token. (Set to **No** for open signup.) |
 
 ### Your wife's account (decide before registering)
 - **A. She has, or gets, an account in the horscrust.com tenant.** This is the simplest option. If Word is signed in with a different account, MSAL shows a one-time popup to pick the horscrust account, then caches it.
 - **B. She uses a personal Microsoft account (outlook.com / hotmail).** Invite that account as a **B2B guest** into the tenant, keep the app single-tenant, and set the MSAL authority to your tenant ID. "Assignment required" still works for guests.
-- **Avoid** registering as "any organisation + personal accounts". Any Microsoft account on earth could then get a token, and the server allowlist would become the only gate.
+- **Avoid** registering as "any organisation + personal accounts" *unless you mean to open signup* (next section). Any Microsoft account on earth can then get a token, so the server-side gates become the only protection.
+
+### Open signup (`SIGNUP_MODE=open`, #85)
+Once the go-live checklist below is done, the service is open to anyone with a Microsoft work, school or personal account. This is a deliberate reversal of the "avoid" advice above; the gates that replace the allowlist are:
+- Token validation per tenant: the issuer must match the token's own `tid`, v1 tokens are rejected, and the home-tenant `Pipeline.Read` role is the only pipeline identity honoured (#90).
+- `BLOCKED_TENANTS` (refuse a whole tenant) and per-person block/unblock by an `ADMIN_OIDS` administrator (#82).
+- Capacity and abuse limits: `MAX_USERS`, `MAX_BYTES_PER_OWNER`, `MAX_SERIES_PER_OWNER`, `MAX_RECORDS_PER_SERIES`, `WRITE_RATE_LIMIT_PER_MINUTE`, and the feedback rate limits (#89).
+- `GET /api/users` lists only people you already share a series with; new people are found by exact email (#88).
+- Identity is `oid` (+ `tid`), never email: `name`/`email` claims are display-only because the signer's tenant controls them.
+- Privacy policy and terms are published and linked before first sign-in (`PRIVACY_URL`, `TERMS_URL`, #100).
+
+Rolling back is a config change: set `SIGNUP_MODE=allowlist`. Accounts already created are kept, but `ALLOWED_OIDS` applies again, so anyone not on it is refused.
+
+#### Manual Entra changes (not code; do these in the Entra portal)
+1. App registration → Authentication → **Supported account types**: "Accounts in any organizational directory (Any Microsoft Entra ID tenant - Multitenant) and personal Microsoft accounts".
+2. App registration → Manifest: set `requestedAccessTokenVersion` to `2` (under `api`; the older manifest format calls it `accessTokenAcceptedVersion`). Personal-account tokens are otherwise v1 and are rejected.
+3. Enterprise application → Properties: **Assignment required = No**.
+4. Expose an API: confirm the `access_as_user` scope's "Who can consent" is **Admins and users** (user-consentable). Some other organisations block user consent; their people see an admin-consent prompt, which is expected.
+5. Branding & properties: set the **Privacy statement** and **Terms of service** URLs to the published pages (#100), and consider **publisher verification** - unverified multi-tenant apps get warning banners on the consent screen and are blocked outright in some tenants.
+6. `ENTRA_TENANT_ID` must be the home tenant's GUID (not a domain) when `SIGNUP_MODE=open`.
+
+#### Go-live checklist (the gate for #85; tracked on #92)
+- [ ] WP1-WP4 (#88, #89, #90, #91) merged.
+- [ ] #100: privacy policy and terms published, linked from the pane and sign-in dialog, first-sign-in acknowledgement working.
+- [ ] #86 (delete my account) landed: it is the GDPR erasure right, required **before** the announcement.
+- [ ] #82 (admin view/block) landed, and the policy discloses the administrator's access.
+- [ ] Backup retention vs. erasure decided and documented in [docs/BACKUP.md](docs/BACKUP.md) / [docs/RESTORE.md](docs/RESTORE.md); deleted accounts must not reappear after a restore.
+- [ ] Proxy and container log retention confirmed (IP addresses are personal data) and stated in the policy.
+- [ ] Reverse proxy / DDoS protection reviewed for a public box.
+- [ ] Entra changes above done; publisher verification decided.
+- [ ] `MAX_USERS` and `BLOCKED_TENANTS` chosen.
+- [ ] Tested with a personal Microsoft account and a second tenant with `SIGNUP_MODE=open` before announcing.
+- [ ] Then flip `SIGNUP_MODE=open` in production.
 
 ### Server side (FastAPI)
 - Validate every request's `Authorization: Bearer` JWT:
@@ -137,7 +169,8 @@ the domain hosting the app that redirects to it.
   - and either `scp` contains `access_as_user` (a person) or `roles` contains `Pipeline.Read` (the daemon, read-only)
 - `fastapi-azure-auth` does most of this if you'd rather not hand-roll the ~40 lines.
 - Identify people by **`oid`** (plus `tid`), never by email. Create a `users` row on first sign-in.
-- Defence in depth: an `ALLOWED_OIDS` env var (required in entra mode; `*` opts out). Anyone else gets a 403, even with a valid token.
+- In `SIGNUP_MODE=open` the issuer is checked against the token's own `tid` instead of one fixed tenant (see "Open signup").
+- Defence in depth: an `ALLOWED_OIDS` env var (required in entra mode with `SIGNUP_MODE=allowlist`; `*` opts out; optional in open mode). Anyone else gets a 403, even with a valid token.
 - `AUTH_MODE` env: `none` (local demo), `token` (the current shared secret), `entra` (production).
 
 ### Ownership and sharing
@@ -207,12 +240,13 @@ the domain hosting the app that redirects to it.
 | Server unreachable, so the pane is empty | Phase 1 error state. Later: cache the last bundle in `localStorage` and show it read-only. |
 | Word caches old pane files after updates | Version the static files (`app.js?v=`) or clear `%LOCALAPPDATA%\Microsoft\Office\16.0\Wef\`. |
 | Office requires trusted HTTPS | Dev: Office dev cert. Prod: real cert via the reverse proxy. |
-| Sensitive data exposure | LAN/VPN only, Entra sign-in with assignment required, an `ALLOWED_OIDS` allowlist, and no content in the .docx. |
+| Sensitive data exposure | Entra sign-in; in allowlist mode assignment required plus an `ALLOWED_OIDS` allowlist, in open mode the gates under "Open signup". Never any content in the .docx. |
 | Word signed in with a different account than the one allowed | One-time MSAL popup to choose the right account, cached after that. |
 | Older/perpetual Word without NAA | Detect with `isSetSupported("NestedAppAuth","1.1")` and fall back to the Office dialog API. |
 | Popups blocked in the task pane | Always start `acquireTokenPopup` from a button click (user gesture). |
 | Two people editing the same record | `version` + 409 conflict prompt (decision 5). |
-| Server admin can read everything | By design. Tell your wife; if that matters, encrypt per-user fields (not planned). |
+| Server admin can read everything | By design. Tell your wife; if that matters, encrypt per-user fields (not planned). With open signup the privacy policy must say the same in plain words. |
+| Strangers sign up (open mode) | Not a risk until `SIGNUP_MODE=open`; then the limits, tenant blocklist and admin block above, plus the go-live checklist. Personal data of people in the UK/EU: see #100. |
 | Characters appearing in both Series A and B | Not supported (series-scoped). If it comes up, add a "copy character to series" action rather than sharing records. |
 
 ---

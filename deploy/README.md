@@ -146,13 +146,37 @@ dialog: the home tenant in `SIGNUP_MODE=allowlist` (unchanged), and
 `https://login.microsoftonline.com/common` in `open` mode. For personal
 Microsoft accounts to work in `open` mode, the Entra app registration must be
 set to "Accounts in any organizational directory and personal Microsoft
-accounts" and have `accessTokenAcceptedVersion` = 2 in its manifest (otherwise
+accounts" and have `requestedAccessTokenVersion` = 2 in its manifest (the older
+manifest format calls it `accessTokenAcceptedVersion`; otherwise
 personal-account tokens carry a v1 issuer and are rejected). Some other
 organisations block user consent, so their people will see an admin-consent
 prompt; that is expected. Optionally set `PRIVACY_URL` and `TERMS_URL` (https)
 to show privacy and terms links before first sign-in. After changing
 `SIGNUP_MODE`, people who are already signed in should sign out and back in,
 because their cached account belongs to the old authority.
+
+### Going live with open signup (#85, #92)
+
+Don't set `SIGNUP_MODE=open` until the go-live checklist in `PLAN.md`
+section 3 is complete. In short: the Entra app registration changes (also in
+`PLAN.md`), privacy policy and terms published and set as `PRIVACY_URL` /
+`TERMS_URL`, account deletion available, backup retention decided
+([docs/BACKUP.md](../docs/BACKUP.md)), proxy log retention and DDoS protection
+reviewed, and a test with a personal Microsoft account and a second tenant.
+Then in `deploy/compose.yaml`:
+
+- `SIGNUP_MODE: "open"` (needs `AUTH_MODE: entra` and `ENTRA_TENANT_ID` set to
+  the home tenant's GUID; `ALLOWED_OIDS` becomes optional).
+- `BLOCKED_TENANTS`: tenant ids to refuse, if any.
+- `MAX_USERS`: a cap on total accounts (`0` = unlimited). Once reached, people
+  who have never signed in get a 403; existing accounts are unaffected.
+- The other limits (`MAX_BYTES_PER_OWNER`, `MAX_SERIES_PER_OWNER`,
+  `MAX_RECORDS_PER_SERIES`, `WRITE_RATE_LIMIT_PER_MINUTE`,
+  `FEEDBACK_RATE_LIMIT_*`) have defaults; see `.env.example` before changing.
+
+Redeploy, then check `/api/config` reports the `common` authority. To roll
+back set `SIGNUP_MODE: "allowlist"` again; accounts already created are kept
+and `ALLOWED_OIDS` applies again.
 
 ### Administrators: viewing and blocking users (#82)
 

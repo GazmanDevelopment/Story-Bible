@@ -64,15 +64,44 @@ Two things are deliberately **not** done in the app: `frame-ancestors` /
 range of Microsoft origins, and a wrong list would blank it), and
 `Strict-Transport-Security` (belongs on the TLS-terminating reverse proxy).
 
+## Open signup (`SIGNUP_MODE=open`)
+
+With open signup, "has a valid Microsoft token" no longer means "is one of
+my people", so the server enforces the following itself:
+
+- Tokens are validated against the signing tenant: the issuer must match the
+  token's own `tid`, v1 tokens are refused, and only the home tenant's
+  `Pipeline.Read` role counts as the review pipeline.
+- `BLOCKED_TENANTS` refuses whole tenants; administrators can block a single
+  person (a block survives account deletion).
+- Limits: `MAX_USERS`, `MAX_BYTES_PER_OWNER`, `MAX_SERIES_PER_OWNER`,
+  `MAX_RECORDS_PER_SERIES`, `WRITE_RATE_LIMIT_PER_MINUTE` and the feedback
+  rate limits. All are listed in `.env.example`.
+- `GET /api/users` only returns people you already share a series with.
+- Identity is the `oid` (with `tid`); name and email claims are display-only
+  because the person's own tenant controls them.
+- Reverse-proxy and container logs contain IP addresses (personal data); the
+  operator sets their retention and the privacy policy states it.
+- Backups contain everyone's data and age out after `BACKUP_KEEP_DAYS`; see
+  [docs/BACKUP.md](docs/BACKUP.md) for how erasure interacts with them.
+
+The manual Entra settings and the go-live checklist are in `PLAN.md` §3.
+
 ## What's already a known, accepted trade-off
 
 A few things are deliberate design decisions written up in `PLAN.md`'s risk
 table, not vulnerabilities:
-- The intended deployment is LAN/VPN-only, behind a reverse proxy the
-  operator controls - it is not meant to be exposed directly to the internet.
+- The default deployment (`SIGNUP_MODE=allowlist`) is for a few named people,
+  behind a reverse proxy the operator controls. `SIGNUP_MODE=open` (#85)
+  deliberately lets any Microsoft account sign in, so the service is then
+  public; see "Open signup" above for what protects it. It is never exposed
+  directly to the internet: a reverse proxy does TLS and DDoS protection.
 - Whoever administers the host can read the SQLite database directly; Entra
   ID sign-in controls what the *app* shows, not what a server admin with
-  filesystem access can see.
+  filesystem access can see. In plain words, as the privacy policy must say:
+  the person running the server can read everyone's stories and account
+  details. Administrators named in `ADMIN_OIDS` can also see the user list
+  (names, emails, usage counts - never story content) and block people.
 - Traffic between a LAN-local reverse proxy and this service may be plain
   HTTP, by the operator's choice, on their own network.
 
