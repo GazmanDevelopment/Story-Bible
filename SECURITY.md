@@ -40,8 +40,9 @@ route that isn't on its allow-list fails the build unless it requires auth):
 
 - `GET /api/health` - liveness for Docker/monitoring: `ok`, `auth` (whether
   auth is on), the version, and a `backup_ok` boolean.
-- `GET /api/config` - the Entra tenant and client ids the task pane needs
-  before it can sign in. Both are public values (they're in the manifest).
+- `GET /api/config` - the Entra tenant and client ids, the sign-in authority
+  and the optional privacy/terms links the task pane needs
+  before it can sign in. All are public values (the ids are in the manifest).
 - `GET /` and the static task-pane files - the UI shell, no data.
 
 The Swagger UI / ReDoc / `openapi.json` pages are **off by default**; setting

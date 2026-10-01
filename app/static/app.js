@@ -17,7 +17,7 @@ const S = {
   me: null,           // {isAdmin, ...} from GET /api/me - only fetched in entra mode
   adminError: null,
   adminUsers: null,   // admin view's user list
-  config: null,       // {authMode, tenantId, clientId} from GET /api/config (#13)
+  config: null,       // {authMode, tenantId, clientId, authority, privacyUrl, termsUrl} from GET /api/config (#13, #91)
   formSnapshot: null, // JSON of the open form's fields right after rendering - unsaved-changes guard (#58)
 };
 
@@ -197,11 +197,13 @@ async function initAuth() {
   try {
     S.config = await (await fetch("/api/config")).json();
   } catch {
-    S.config = { authMode: "none", tenantId: "", clientId: "" };  // server unreachable - boot()'s own error state takes it from here
+    S.config = { authMode: "none", tenantId: "", clientId: "", authority: "", privacyUrl: "", termsUrl: "" };  // server unreachable - boot()'s own error state takes it from here
   }
   if (S.config.authMode !== "entra") return;
   const msalConfig = {
-    auth: { clientId: S.config.clientId, authority: `https://login.microsoftonline.com/${S.config.tenantId}` },
+    // authority comes from the server (#91): the home tenant, or "common" in open
+    // signup. The tenantId fallback is for a server that predates the field.
+    auth: { clientId: S.config.clientId, authority: S.config.authority || `https://login.microsoftonline.com/${S.config.tenantId}` },
     cache: { cacheLocation: "localStorage" },  // survives the task pane closing/reopening with a document
   };
   try {
@@ -1106,6 +1108,15 @@ async function loadApp() {
   }
 }
 
+// Privacy / terms links under Sign in, so they are visible before anyone's first
+// sign-in. Only https URLs are ever rendered (the server filters too).
+function legalLinksHtml() {
+  const links = [["Privacy policy", S.config.privacyUrl], ["Terms of use", S.config.termsUrl]]
+    .filter(([, url]) => /^https:\/\//i.test(url || ""))
+    .map(([label, url]) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+  return links.length ? `<p class="legal-links">${links.join(" · ")}</p>` : "";
+}
+
 async function boot() {
   await initAuth();
   if (S.config.authMode === "entra" && !msalAccount) {
@@ -1114,7 +1125,7 @@ async function boot() {
     // shows a Sign in button, never auto-prompts.
     renderHeader();
     $("#main").innerHTML = `<div class="empty">Sign in to continue.<br><br>
-      <button class="primary" data-act="sign-in">Sign in</button></div>`;
+      <button class="primary" data-act="sign-in">Sign in</button>${legalLinksHtml()}</div>`;
     return;
   }
   await loadApp();

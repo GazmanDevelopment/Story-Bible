@@ -63,6 +63,9 @@ services:
       # before changing it. BLOCKED_TENANTS: tenant ids refused in open mode.
       SIGNUP_MODE: "allowlist"
       BLOCKED_TENANTS: ""
+      # Optional https links shown before first sign-in (#91).
+      PRIVACY_URL: ""
+      TERMS_URL: ""
       # The pane's "Log Issue"/"Log Suggestion" buttons (#22) - a
       # fine-grained GitHub PAT, scoped to just this repo, Issues: write
       # only. Blank means filing returns 503 rather than crashing.

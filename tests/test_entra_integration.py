@@ -69,7 +69,36 @@ def _auth(token):
 def test_config_endpoint_needs_no_auth_and_reflects_auth_mode(entra_mode):
     r = c.get("/api/config")
     assert r.status_code == 200
-    assert r.json() == {"authMode": "entra", "tenantId": TENANT, "clientId": CLIENT_ID}
+    assert r.json() == {"authMode": "entra", "tenantId": TENANT, "clientId": CLIENT_ID,
+                        "authority": f"https://login.microsoftonline.com/{TENANT}",
+                        "privacyUrl": "", "termsUrl": ""}
+
+
+def test_config_authority_is_common_in_open_signup_mode(entra_mode, monkeypatch):
+    """#91: open signup must offer personal + any-tenant accounts."""
+    monkeypatch.setattr(auth, "SIGNUP_MODE", "open")
+    body = c.get("/api/config").json()
+    assert body["authority"] == "https://login.microsoftonline.com/common"
+    assert body["tenantId"] == TENANT  # still sent, for already-loaded panes
+
+
+def test_config_legal_links_pass_through_only_when_https(entra_mode, monkeypatch):
+    monkeypatch.setenv("PRIVACY_URL", "https://example.com/privacy")
+    monkeypatch.setenv("TERMS_URL", "javascript:alert(1)")
+    body = c.get("/api/config").json()
+    assert body["privacyUrl"] == "https://example.com/privacy"
+    assert body["termsUrl"] == ""
+
+
+@pytest.mark.parametrize("bad", [
+    "http://example.com/p", "data:text/html,x", "https:/example.com", "https://", "https://exa mple.com",
+    "//example.com", "example.com/privacy", "",
+])
+def test_config_legal_links_reject_anything_but_a_wellformed_https_url(entra_mode, monkeypatch, bad):
+    monkeypatch.setenv("PRIVACY_URL", bad)
+    monkeypatch.delenv("TERMS_URL", raising=False)
+    body = c.get("/api/config").json()
+    assert body["privacyUrl"] == "" and body["termsUrl"] == ""
 
 
 def test_config_endpoint_in_default_mode_has_no_tenant_info():
@@ -78,6 +107,7 @@ def test_config_endpoint_in_default_mode_has_no_tenant_info():
     body = r.json()
     assert body["authMode"] in ("none", "token")
     assert body["tenantId"] == "" and body["clientId"] == ""
+    assert body["authority"] == ""
 
 
 def test_entra_mode_rejects_requests_with_no_bearer_token(entra_mode):
