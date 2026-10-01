@@ -57,6 +57,14 @@ if any(ch in LEGACY_OWNER_OID for ch in ",* \t"):
     # nothing would be claimed and the only symptom would be missing data.
     raise RuntimeError("LEGACY_OWNER_OID must be a single Entra object id")
 
+# Who may use the admin routes (#82). Entra object ids, NEVER emails: with open
+# signup (#85) the email / preferred_username claims are controlled by whichever
+# tenant the person signs in from, so an email match would be forgeable. An oid
+# is a GUID Entra assigns. Only honoured in AUTH_MODE=entra.
+ADMIN_OIDS = {x.strip().lower() for x in os.environ.get("ADMIN_OIDS", "").split(",") if x.strip()}
+if any(ch in oid for oid in ADMIN_OIDS for ch in "*@ \t"):
+    raise RuntimeError("ADMIN_OIDS must be a comma-separated list of Entra object ids (not emails or '*')")
+
 if AUTH_MODE not in ("none", "token", "entra"):
     raise RuntimeError(f"AUTH_MODE must be 'none', 'token' or 'entra', got {AUTH_MODE!r}")
 if AUTH_MODE == "entra" and not (ENTRA_TENANT_ID and ENTRA_CLIENT_ID):

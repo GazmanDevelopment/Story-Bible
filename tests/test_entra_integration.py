@@ -101,7 +101,7 @@ def test_me_endpoint_reflects_the_bearer_tokens_identity(entra_mode):
     body = r.json()
     assert body == {
         "oid": "cccccccc-0000-0000-0000-000000000003",
-        "email": "grace@example.com", "displayName": "Grace Hopper", "isPipeline": False,
+        "email": "grace@example.com", "displayName": "Grace Hopper", "isPipeline": False, "isAdmin": False,
     }
 
 
