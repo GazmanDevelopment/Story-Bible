@@ -840,6 +840,29 @@ def test_signed_out_pane_shows_privacy_and_terms_links(server, browser_page):
     assert not errors, errors
 
 
+def test_account_view_shows_privacy_and_terms_links_when_signed_in(server, browser_page):
+    """#112: the links stay reachable after sign-in, via the Account view."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.evaluate("""() => {
+        S.config = { ...S.config, authMode: "entra",
+                     privacyUrl: "https://example.com/privacy", termsUrl: "https://example.com/terms" };
+        msalAccount = { name: "Me" }; S.me = { oid: "me", email: "me@x.com", isAdmin: false };
+        renderHeader();
+    }""")
+    pg.click("[data-act=open-account]")
+    pg.wait_for_selector("#deleteConfirm")
+    hrefs = pg.eval_on_selector_all("#main .legal-links a", "els => els.map(e => e.href)")
+    assert hrefs == ["https://example.com/privacy", "https://example.com/terms"]
+    assert pg.get_attribute("#main .legal-links a", "rel") == "noopener noreferrer"
+    # not configured (or not https) -> no links at all
+    pg.evaluate("""() => { S.config = { ...S.config, privacyUrl: "javascript:alert(1)", termsUrl: "" }; render(); }""")
+    assert pg.locator("#main .legal-links").count() == 0
+    assert "javascript:" not in pg.inner_html("#main")
+    assert not errors, errors
+
+
 def test_sign_in_dialog_uses_config_authority_and_shows_links(server, browser_page):
     pg, errors = browser_page
     pg.route("**/api/config", lambda route: route.fulfill(json=ENTRA_CONFIG))

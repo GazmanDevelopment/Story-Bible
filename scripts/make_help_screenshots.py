@@ -170,7 +170,8 @@ def shoot(base: str, img_path: Path) -> None:
             # Account view (#86). The demo runs without sign-in, so fake a
             # signed-in person client-side; nothing is sent to the server.
             pg.evaluate("""() => {
-              S.config = {...S.config, authMode: 'entra'};
+              S.config = {...S.config, authMode: 'entra',
+                          privacyUrl: 'https://example.com/privacy', termsUrl: 'https://example.com/terms'};
               msalAccount = {name: 'Alex Morgan', username: 'alex.morgan@example.com'};
               S.me = {oid: 'x', email: 'alex.morgan@example.com', displayName: 'Alex Morgan', isAdmin: false};
               renderHeader();
