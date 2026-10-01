@@ -128,6 +128,22 @@ def test_legal_pages_have_version_and_contact():
         assert not re.search(r"#\d+", text), f"{page.name}: issue number in user-facing text"
 
 
+def test_default_policy_version_matches_the_legal_pages():
+    """#111: POLICY_VERSION is what people accept; it must be the version the
+    pages show. Bump both together (and the pages' date) when the text changes."""
+    import os
+    from app import main
+    assert "POLICY_VERSION" not in os.environ, "unset POLICY_VERSION to test the default"
+    for page in LEGAL:
+        m = re.search(r"Version (\d+\.\d+), effective", page.read_text(encoding="utf-8"))
+        assert m and m.group(1) == main.POLICY_VERSION, page.name
+
+
+def test_guide_describes_the_policy_acceptance_screen():
+    guide = (DOCS / "help" / "index.html").read_text(encoding="utf-8")
+    assert "Accept and continue" in guide and "policy-gate.png" in guide
+
+
 def test_privacy_policy_covers_required_topics():
     text = (DOCS / "privacy.html").read_text(encoding="utf-8").lower()
     for needle in ("uk gdpr", "gareth huscroft", "admin dashboard", "github", "local storage",

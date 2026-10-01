@@ -59,6 +59,9 @@ keeps behaving exactly as before with no other change required).
   PRIVACY_URL, TERMS_URL
                     optional https links to the privacy policy / terms, shown
                     on the signed-out pane and sign-in dialog (#91)
+  POLICY_VERSION    version of the privacy policy and terms (default 1.0); people
+                    must accept the current one after signing in, so bump it
+                    whenever the legal pages change (#111)
   ADMIN_OIDS        comma-separated Entra object ids of the administrators who
                     get the pane's Admin view (users, usage, blocking). Object
                     ids only, never emails - with open signup an email claim
@@ -121,6 +124,8 @@ MAX_RECORDS_PER_SERIES = int(os.environ.get("MAX_RECORDS_PER_SERIES", 20_000))
 MAX_SERIES_PER_OWNER = int(os.environ.get("MAX_SERIES_PER_OWNER", 200))
 # Open-signup abuse limits (#89). 0 turns each one off.
 MAX_USERS = int(os.environ.get("MAX_USERS", 0))
+# Version of the privacy policy and terms people must have accepted (#111).
+POLICY_VERSION = os.environ.get("POLICY_VERSION", "1.0").strip() or "1.0"
 MAX_BYTES_PER_OWNER = int(os.environ.get("MAX_BYTES_PER_OWNER", 500 * 1024 * 1024))
 WRITE_RATE_LIMIT_PER_MINUTE = int(os.environ.get("WRITE_RATE_LIMIT_PER_MINUTE", 120))
 # Same sliding-window limiter the feedback route uses (no overall cap: this is
@@ -962,6 +967,7 @@ class ConfigOut(BaseModel):
     authority: str = ""     # the MSAL authority to sign in against (#91); "" outside entra mode
     privacyUrl: str = ""    # optional legal links shown before first sign-in
     termsUrl: str = ""
+    policyVersion: str = ""  # current privacy policy / terms version (#111)
 
 
 def _https_url(name: str) -> str:
@@ -987,6 +993,7 @@ def get_config():
         "authority": auth.authority() if entra else "",
         "privacyUrl": _https_url("PRIVACY_URL"),
         "termsUrl": _https_url("TERMS_URL"),
+        "policyVersion": POLICY_VERSION,
     }
 
 
@@ -996,12 +1003,50 @@ class MeOut(BaseModel):
     displayName: str
     isPipeline: bool
     isAdmin: bool = False
+    policyVersion: str = ""       # the version they accepted ("" = none yet) (#111)
+    policyAcceptedAt: float = 0
+    policyCurrent: bool = True    # accepted the current version (always true without accounts)
+
+
+def _me_out(user: auth.CurrentUser) -> dict:
+    """The /api/me body. Policy state is read from the DB every time rather
+    than the _seen_users cache, so a POLICY_VERSION bump is noticed at once.
+    Anyone without a users row (none/token mode, the pipeline) counts as current."""
+    out = {"oid": user.oid, "email": user.email, "displayName": user.display_name,
+           "isPipeline": user.is_pipeline, "isAdmin": is_admin(user),
+           "policyVersion": "", "policyAcceptedAt": 0, "policyCurrent": True}
+    if auth.AUTH_MODE == "entra" and not user.is_pipeline:
+        with db() as con:
+            row = con.execute("SELECT policy_version, policy_accepted_at FROM users WHERE oid=?",
+                              (user.oid,)).fetchone()
+        if row:
+            out.update(policyVersion=row["policy_version"], policyAcceptedAt=row["policy_accepted_at"],
+                       policyCurrent=row["policy_version"] == POLICY_VERSION)
+    return out
 
 
 @app.get("/api/me", tags=["auth"], response_model=MeOut)
 def get_me(user: auth.CurrentUser = Depends(get_current_user)):
-    return {"oid": user.oid, "email": user.email, "displayName": user.display_name,
-            "isPipeline": user.is_pipeline, "isAdmin": is_admin(user)}
+    return _me_out(user)
+
+
+class AcceptPolicyBody(BaseModel):
+    version: str = Field(max_length=64)
+
+
+@app.post("/api/me/accept-policy", tags=["auth"], response_model=MeOut, dependencies=WRITE_LIMIT)
+def accept_policy(body: AcceptPolicyBody, user: auth.CurrentUser = Depends(require_person)):
+    """Record that the caller accepted the privacy policy and terms (#111).
+    `version` must be the current POLICY_VERSION, so a stale pane can't accept
+    a version it never showed."""
+    if auth.AUTH_MODE != "entra":
+        raise HTTPException(400, "Accounts are only used when the server requires sign-in")
+    if body.version != POLICY_VERSION:
+        raise HTTPException(409, "The policy has changed - reload to see the current version")
+    with db(write=True) as con:
+        con.execute("UPDATE users SET policy_version=?, policy_accepted_at=? WHERE oid=?",
+                    (POLICY_VERSION, time.time(), user.oid))
+    return _me_out(user)
 
 
 def delete_account_data(con: sqlite3.Connection, oid: str) -> dict[str, int]:
@@ -1066,7 +1111,8 @@ def export_me(user: auth.CurrentUser = Depends(require_person)):
     memberships in other people's series, and every series they own in the
     usual bundle format."""
     with db() as con:
-        u = con.execute("SELECT oid, email, display_name, tid, first_seen, last_seen FROM users WHERE oid=?",
+        u = con.execute("SELECT oid, email, display_name, tid, first_seen, last_seen, "
+                        "policy_version, policy_accepted_at FROM users WHERE oid=?",
                         (user.oid,)).fetchone()
         memberships = [dict(r) for r in con.execute(
             "SELECT series_id, role FROM members WHERE oid=? ORDER BY series_id", (user.oid,))]

@@ -151,3 +151,16 @@ def test_v8_adds_deleted_users_tombstones_and_upgrades_a_v7_database():
     cols = [r[1] for r in con.execute("PRAGMA table_info(deleted_users)")]
     assert cols == ["oid", "deleted_at"]
     con.close()
+
+
+def test_v9_adds_policy_acceptance_columns_and_upgrades_a_v8_database():
+    """#111: existing users start with no accepted version, so they are asked once."""
+    from app.migrations import MIGRATIONS
+    con = _new_db()
+    for v in range(1, 9):
+        con.execute("BEGIN IMMEDIATE"); MIGRATIONS[v - 1](con); con.execute(f"PRAGMA user_version = {v}"); con.commit()
+    con.execute("INSERT INTO users (oid, first_seen, last_seen) VALUES ('u', 0, 0)")
+    migrate(con)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 9
+    assert con.execute("SELECT policy_version, policy_accepted_at FROM users WHERE oid='u'").fetchone() == ("", 0)
+    con.close()

@@ -860,3 +860,60 @@ def test_sign_in_dialog_uses_config_authority_and_shows_links(server, browser_pa
     hrefs = pg.eval_on_selector_all("#legal a", "els => els.map(e => e.href)")
     assert hrefs == ["https://example.com/privacy", "https://example.com/terms"]
     assert not errors, errors
+
+
+def test_policy_gate_blocks_the_pane_until_accepted(server, browser_page):
+    """#111: signed in but not on the current policy version -> only the
+    acceptance screen shows (no series loaded) until Accept is clicked."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.evaluate("""() => {
+        window.calls = [];
+        window.accepted = false;
+        const me = () => ({ oid: "me", email: "me@x.com", isAdmin: false, policyCurrent: window.accepted });
+        window.api = async (path, method = "GET", body) => {
+            window.calls.push([method, path, body]);
+            if (path.startsWith("/series")) window.seriesLoaded = true;
+            if (path === "/me") return me();
+            if (path === "/me/accept-policy") { window.accepted = true; return me(); }
+            return [];
+        };
+        S.config = { ...S.config, authMode: "entra", policyVersion: "1.0",
+                     privacyUrl: "https://example.com/privacy", termsUrl: "https://example.com/terms" };
+        msalAccount = { name: "Me" };
+        loadApp();
+    }""")
+    pg.wait_for_selector("[data-act=accept-policy]")
+    text = pg.inner_text("#main")
+    assert "accept the terms and the privacy policy" in text
+    assert pg.locator("#main a[href='https://example.com/privacy']").count() == 1
+    assert pg.locator("#main a[href='https://example.com/terms']").count() == 1
+    assert pg.evaluate("window.calls") == [["GET", "/me", None]]            # nothing else loaded
+    pg.evaluate("render()")                                                  # a re-render keeps the gate
+    assert pg.locator("[data-act=accept-policy]").count() == 1
+    pg.click("[data-act=accept-policy]")
+    pg.wait_for_function("() => window.seriesLoaded === true")       # proceeds to load the app
+    assert ["POST", "/me/accept-policy", {"version": "1.0"}] in pg.evaluate("window.calls")
+    assert pg.locator("[data-act=accept-policy]").count() == 0
+    assert not errors, errors
+
+
+def test_policy_gate_is_skipped_when_already_current(server, browser_page):
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.evaluate("""() => {
+        window.calls = [];
+        window.api = async (path, method = "GET", body) => {
+            window.calls.push([method, path, body]);
+            if (path.startsWith("/series")) window.seriesLoaded = true;
+            return path === "/me" ? { oid: "me", email: "me@x.com", isAdmin: false, policyCurrent: true } : [];
+        };
+        S.config = { ...S.config, authMode: "entra", policyVersion: "1.0" };
+        msalAccount = { name: "Me" };
+        loadApp();
+    }""")
+    pg.wait_for_function("() => window.seriesLoaded === true")
+    assert pg.locator("[data-act=accept-policy]").count() == 0
+    assert not errors, errors

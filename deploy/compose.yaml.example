@@ -66,6 +66,8 @@ services:
       # Optional https links shown before first sign-in (#91).
       PRIVACY_URL: ""
       TERMS_URL: ""
+      # Bump when the privacy policy / terms change: everyone must accept again (#111).
+      POLICY_VERSION: "1.0"
       # The pane's "Log Issue"/"Log Suggestion" buttons (#22) - a
       # fine-grained GitHub PAT, scoped to just this repo, Issues: write
       # only. Blank means filing returns 503 rather than crashing.

@@ -182,6 +182,17 @@ def shoot(base: str, img_path: Path) -> None:
             pg.fill("#deleteConfirm", "alex.morgan@example.com")
             pg.locator("[data-act=delete-account]").scroll_into_view_if_needed()
             snap(pg, "delete-account")
+
+            # First-sign-in acceptance screen (#111), also faked client-side.
+            pg.evaluate("""() => {
+              S.config = {...S.config, policyVersion: '1.0',
+                          privacyUrl: 'https://example.com/privacy', termsUrl: 'https://example.com/terms'};
+              S.view = null;
+              S.me = {...S.me, policyCurrent: false};
+              render();
+            }""")
+            pg.wait_for_selector("[data-act=accept-policy]")
+            snap(pg, "policy-gate")
             pg.close()
         finally:
             browser.close()

@@ -71,7 +71,7 @@ def test_config_endpoint_needs_no_auth_and_reflects_auth_mode(entra_mode):
     assert r.status_code == 200
     assert r.json() == {"authMode": "entra", "tenantId": TENANT, "clientId": CLIENT_ID,
                         "authority": f"https://login.microsoftonline.com/{TENANT}",
-                        "privacyUrl": "", "termsUrl": ""}
+                        "privacyUrl": "", "termsUrl": "", "policyVersion": main.POLICY_VERSION}
 
 
 def test_config_authority_is_common_in_open_signup_mode(entra_mode, monkeypatch):
@@ -132,6 +132,7 @@ def test_me_endpoint_reflects_the_bearer_tokens_identity(entra_mode):
     assert body == {
         "oid": "cccccccc-0000-0000-0000-000000000003",
         "email": "grace@example.com", "displayName": "Grace Hopper", "isPipeline": False, "isAdmin": False,
+        "policyVersion": "", "policyAcceptedAt": 0, "policyCurrent": False,  # not accepted yet (#111)
     }
 
 
