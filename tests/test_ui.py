@@ -708,6 +708,33 @@ def test_admin_view_shows_an_error_instead_of_loading_forever(server, browser_pa
     assert not errors, errors
 
 
+def test_delete_account_needs_the_typed_email_then_signs_out(server, browser_page):
+    """#86: drives the Account view with api() stubbed; the server side is in
+    tests/test_delete_account.py."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.evaluate("""() => {
+        window.calls = [];
+        window.api = async (path, method = "GET", body) => { window.calls.push([method, path, body]); return {}; };
+        S.config = { ...S.config, authMode: "entra" };
+        msalAccount = { name: "Me" }; S.me = { oid: "me", email: "Me@X.com", isAdmin: false };
+        renderHeader();
+    }""")
+    pg.click("[data-act=open-account]")
+    pg.wait_for_selector("#deleteConfirm")
+    pg.click("[data-act=delete-account]")                                   # nothing typed
+    pg.fill("#deleteConfirm", "someone@else.com")
+    pg.click("[data-act=delete-account]")                                   # wrong email
+    assert pg.evaluate("window.calls") == []
+    pg.fill("#deleteConfirm", "me@x.com")                                   # case-insensitive
+    pg.click("[data-act=delete-account]")
+    pg.wait_for_function("window.calls.length === 1")
+    assert pg.evaluate("window.calls") == [["DELETE", "/me", {"confirm": "me@x.com"}]]
+    pg.wait_for_function("S.me === null && S.view === null")
+    assert not errors, errors
+
+
 ENTRA_CONFIG = {"authMode": "entra", "tenantId": "t-home", "clientId": "cid",
                 "authority": "https://login.microsoftonline.com/common",
                 "privacyUrl": "https://example.com/privacy", "termsUrl": "https://example.com/terms"}

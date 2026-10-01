@@ -378,7 +378,7 @@ function renderHeader() {
 
   const ab = $("#authBar");
   ab.innerHTML = S.config?.authMode !== "entra" ? "" : (msalAccount
-    ? `<span>${esc(msalAccount.name || msalAccount.username || "Signed in")}</span>${S.me?.isAdmin ? `<button class="small" data-act="open-admin">Admin</button>` : ""}<button class="small" data-act="sign-out">Sign out</button>`
+    ? `<span>${esc(msalAccount.name || msalAccount.username || "Signed in")}</span>${S.me?.isAdmin ? `<button class="small" data-act="open-admin">Admin</button>` : ""}<button class="small" data-act="open-account">Account</button><button class="small" data-act="sign-out">Sign out</button>`
     : `<button class="small primary" data-act="sign-in">Sign in</button>`);
 
   const lb = $("#linkBar");
@@ -401,6 +401,7 @@ function render() {
   // it were gated behind having one, a user hitting a bug that prevents
   // creating their first series could never report that exact bug.
   if (S.view?.kind === "feedback") { m.innerHTML = renderForm(); captureFormSnapshot(); return; }
+  if (S.view?.kind === "account") { m.innerHTML = `<button class="link back" data-act="cancel">← Back</button>` + accountView(); S.formSnapshot = null; return; }
   if (S.view?.kind === "admin") { m.innerHTML = `<button class="link back" data-act="cancel">← Back</button>` + adminView(); S.formSnapshot = null; return; }
   if (!S.b) {
     S.formSnapshot = null;
@@ -826,6 +827,20 @@ function adminView() {
         ? `<button type="button" class="small" data-act="admin-unblock" data-oid="${esc(u.oid)}">Unblock</button>`
         : `<button type="button" class="small danger" data-act="admin-block" data-oid="${esc(u.oid)}">Block</button>`}</div>`).join("")}`;
 }
+function accountView() {
+  const who = S.me?.email || msalAccount?.username || "";
+  return `<h2>Your account</h2>
+    <div class="hint">Signed in as ${esc(msalAccount?.name || who || "you")}${who ? ` (${esc(who)})` : ""}.</div>
+    <h3>Download my data</h3>
+    <div class="hint">A JSON file with your account details and every series you own.</div>
+    <button type="button" data-act="download-my-data">Download my data</button>
+    <h3>Delete my account</h3>
+    <div class="hint">This permanently deletes your account and all the series you own, with their characters, places, timeline, research and chapters. Anyone you shared a series with loses access to it. You will also be removed from series other people shared with you, and your name on their entries becomes "Deleted user".</div>
+    <div class="hint">Nightly backups keep a copy for a few days before it ages out. Feedback you filed is public on GitHub and can't be removed from here.</div>
+    <label><span>${S.me?.email ? "Type your email address to confirm" : "Type DELETE to confirm"}</span>
+      <input id="deleteConfirm" type="text" autocomplete="off" value=""></label>
+    <button type="button" class="danger" data-act="delete-account">Delete my account and data</button>`;
+}
 async function loadAdminUsers() {
   S.adminError = null;
   try { S.adminUsers = await api("/admin/users"); }
@@ -937,6 +952,19 @@ async function onClick(ev) {
       case "save-token": lsSet("sb_token", $("#tokenInput").value.trim()); await boot(); toast("Token saved"); break;
       case "sign-in": await signIn(); if (msalAccount) { await loadApp(); } else { renderHeader(); } break;
       case "sign-out": await signOut(); S.b = null; S.me = null; S.view = null; S.seriesList = []; render(); break;
+      case "open-account": S.view = { kind: "account", id: null }; render(); break;
+      case "download-my-data": {
+        const blob = new Blob([JSON.stringify(await api("/me/export"), null, 2)], { type: "application/json" });
+        const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+        a.download = "storybible-my-data.json"; a.click(); break;
+      }
+      case "delete-account": {
+        const typed = $("#deleteConfirm").value.trim();
+        if (!typed || typed.toLowerCase() !== (S.me?.email || "DELETE").trim().toLowerCase()) { toast(S.me?.email ? "Type your email address to confirm" : "Type DELETE to confirm", "error"); return; }
+        await api("/me", "DELETE", { confirm: typed });
+        await signOut(); S.b = null; S.me = null; S.view = null; S.seriesList = []; render();
+        toast("Your account and data have been deleted"); break;
+      }
       case "open-admin": S.view = { kind: "admin", id: null }; S.adminUsers = null; S.adminError = null; render(); await loadAdminUsers(); break;
       case "admin-block": {
         const u = S.adminUsers.users.find((x) => x.oid === t.dataset.oid);

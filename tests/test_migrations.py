@@ -138,3 +138,16 @@ def test_v7_adds_users_tid_and_upgrades_a_v6_database():
     assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 7
     assert con.execute("SELECT tid FROM users WHERE oid='u'").fetchone() == ("",)
     con.close()
+
+
+def test_v8_adds_deleted_users_tombstones_and_upgrades_a_v7_database():
+    """#86: oid + time only, no foreign key, so it outlives the users row."""
+    from app.migrations import MIGRATIONS
+    con = _new_db()
+    for v in range(1, 8):
+        con.execute("BEGIN IMMEDIATE"); MIGRATIONS[v - 1](con); con.execute(f"PRAGMA user_version = {v}"); con.commit()
+    migrate(con)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 8
+    cols = [r[1] for r in con.execute("PRAGMA table_info(deleted_users)")]
+    assert cols == ["oid", "deleted_at"]
+    con.close()

@@ -166,6 +166,22 @@ def shoot(base: str, img_path: Path) -> None:
             pg.fill("[data-f=title]", "Example: button does nothing")
             pg.fill("[data-f=description]", "What happened, and what you expected.")
             snap(pg, "log-issue")
+
+            # Account view (#86). The demo runs without sign-in, so fake a
+            # signed-in person client-side; nothing is sent to the server.
+            pg.evaluate("""() => {
+              S.config = {...S.config, authMode: 'entra'};
+              msalAccount = {name: 'Alex Morgan', username: 'alex.morgan@example.com'};
+              S.me = {oid: 'x', email: 'alex.morgan@example.com', displayName: 'Alex Morgan', isAdmin: false};
+              renderHeader();
+            }""")
+            snap(pg, "signed-in")
+            pg.click("[data-act=open-account]")
+            pg.wait_for_selector("#deleteConfirm")
+            snap(pg, "account")
+            pg.fill("#deleteConfirm", "alex.morgan@example.com")
+            pg.locator("[data-act=delete-account]").scroll_into_view_if_needed()
+            snap(pg, "delete-account")
             pg.close()
         finally:
             browser.close()
