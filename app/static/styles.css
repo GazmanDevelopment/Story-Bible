@@ -87,6 +87,9 @@ label > span { display: block; font-size: 12px; color: var(--muted); margin-bott
 .tl li { position: relative; }
 .tl li::before { content: ""; position: absolute; left: -19px; top: 12px; width: 10px; height: 10px;
   border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
+.tl li.dim { opacity: .35; }
+.tl-pills { display: flex; gap: 6px; align-items: baseline; margin-bottom: 6px; }
+.tl-pills .lbl { font-size: 12px; color: var(--muted); min-width: 64px; }
 .when { font-size: 12px; font-weight: 600; color: var(--accent); }
 .ages { font-size: 12px; color: var(--muted); }
 .hint { font-size: 12px; color: var(--muted); margin: 4px 0 8px; }
