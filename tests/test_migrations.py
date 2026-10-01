@@ -125,3 +125,16 @@ def test_v6_adds_blocked_users_and_upgrades_a_v5_database():
     con.execute("DELETE FROM users WHERE oid='u'")
     assert con.execute("SELECT reason FROM blocked_users WHERE oid='u'").fetchone() == ("",)
     con.close()
+
+
+def test_v7_adds_users_tid_and_upgrades_a_v6_database():
+    """#90: the tenant a person signed in from; existing rows get ''."""
+    from app.migrations import MIGRATIONS
+    con = _new_db()
+    for v in range(1, 7):
+        con.execute("BEGIN IMMEDIATE"); MIGRATIONS[v - 1](con); con.execute(f"PRAGMA user_version = {v}"); con.commit()
+    con.execute("INSERT INTO users (oid, first_seen, last_seen) VALUES ('u', 0, 0)")
+    migrate(con)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION >= 7
+    assert con.execute("SELECT tid FROM users WHERE oid='u'").fetchone() == ("",)
+    con.close()

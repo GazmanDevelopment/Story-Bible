@@ -52,6 +52,10 @@ keeps behaving exactly as before with no other change required).
                     everyone Entra lets in (#70)
   LEGACY_OWNER_OID  the one Entra object id that owns series created before
                     sign-in existed; unset = nobody claims them (#70)
+  SIGNUP_MODE       allowlist (default: one tenant, ALLOWED_OIDS required) or
+                    open (any Microsoft account; AUTH_MODE=entra only; ALLOWED_OIDS
+                    optional) (#90)
+  BLOCKED_TENANTS   open mode: comma-separated tenant ids refused with 403 (#90)
   ADMIN_OIDS        comma-separated Entra object ids of the administrators who
                     get the pane's Admin view (users, usage, blocking). Object
                     ids only, never emails - with open signup an email claim
@@ -155,6 +159,9 @@ def init_db() -> None:
                 "AUTH_MODE=none: the API has NO authentication - anyone who can reach this "
                 "port can read and delete every series. Set STORYBIBLE_TOKEN or AUTH_MODE=entra.")
         if auth.AUTH_MODE == "entra":
+            if auth.SIGNUP_MODE == "open":
+                logger.warning("SIGNUP_MODE=open: any Microsoft account can sign in. "
+                               "Blocked tenants: %d; MAX_USERS=%s.", len(auth.BLOCKED_TENANTS), MAX_USERS or "unlimited")
             if auth.LEGACY_OWNER_OID and auth.ALLOWED_OIDS and auth.LEGACY_OWNER_OID not in auth.ALLOWED_OIDS:
                 logger.warning(
                     "LEGACY_OWNER_OID is not in ALLOWED_OIDS, so that person can never sign in "
@@ -392,13 +399,13 @@ def upsert_user(con: sqlite3.Connection, user: auth.CurrentUser) -> bool:
     row = con.execute("SELECT oid FROM users WHERE oid=?", (user.oid,)).fetchone()
     if row:
         con.execute(
-            "UPDATE users SET email=?, display_name=?, last_seen=? WHERE oid=?",
-            (user.email, user.display_name, now, user.oid),
+            "UPDATE users SET email=?, display_name=?, tid=?, last_seen=? WHERE oid=?",
+            (user.email, user.display_name, user.tid, now, user.oid),
         )
         return False
     con.execute(
-        "INSERT INTO users (oid, email, display_name, first_seen, last_seen) VALUES (?,?,?,?,?)",
-        (user.oid, user.email, user.display_name, now, now),
+        "INSERT INTO users (oid, email, display_name, tid, first_seen, last_seen) VALUES (?,?,?,?,?,?)",
+        (user.oid, user.email, user.display_name, user.tid, now, now),
     )
     return True
 
@@ -414,7 +421,7 @@ LAST_SEEN_REFRESH_SECONDS = 300
 # that points the app at a different file) get their own entries. Replacing the
 # database file underneath a RUNNING process is not supported anyway - restart
 # it, which also clears this - see docs/RESTORE.md.
-_seen_users: dict[tuple[str, str], tuple[str, str, float]] = {}
+_seen_users: dict[tuple[str, str], tuple[str, str, str, float]] = {}
 # Bumped by every block (#82). get_current_user reads it before its DB check and
 # only caches the person if it hasn't moved, so a request that was already past
 # the blocked_users check can't re-create the cache entry a block just evicted.
@@ -451,7 +458,7 @@ def get_current_user(
         key, now = (DB_PATH, user.oid), time.monotonic()
         epoch = _block_epoch
         seen = _seen_users.get(key)
-        if seen and seen[:2] == (user.email, user.display_name) and now - seen[2] < LAST_SEEN_REFRESH_SECONDS:
+        if seen and seen[:3] == (user.email, user.display_name, user.tid) and now - seen[3] < LAST_SEEN_REFRESH_SECONDS:
             return user  # already recorded a moment ago: no connection, no write
         # write=True when capped so two first sign-ins can't both squeeze past
         # MAX_USERS (#89); uncapped, this stays the cheap lazy transaction.
@@ -460,13 +467,23 @@ def get_current_user(
                 # #82. Never reaches the _seen_users cache below, and
                 # admin_block_user() evicts any entry made before the block.
                 raise HTTPException(403, "This account has been disabled")
-            if MAX_USERS > 0 and not con.execute("SELECT 1 FROM users WHERE oid=?", (user.oid,)).fetchone():
+            known = con.execute("SELECT tid FROM users WHERE oid=?", (user.oid,)).fetchone()
+            if known and known["tid"] and user.tid and known["tid"] != user.tid:
+                # Same oid from a different tenant: oid is the primary key, so
+                # this would take over (and overwrite) another person's account.
+                logger.warning("entra auth failed: oid already belongs to another tenant")
+                raise HTTPException(403, "Not authorized")
+            if MAX_USERS > 0 and not known:
                 # (LEGACY_OWNER_OID is exempt: refusing them would strand the pre-sign-in series.)
                 if (user.oid != auth.LEGACY_OWNER_OID
                         and con.execute("SELECT COUNT(*) FROM users").fetchone()[0] >= MAX_USERS):
                     raise HTTPException(403, "This server is not accepting new accounts right now")
             upsert_user(con, user)
+            # In open mode also require the home tenant: oids are only unique
+            # within a tenant's own namespace, so never hand pre-sign-in series
+            # to a foreign-tenant principal presenting the same oid (#90).
             if (auth.LEGACY_OWNER_OID and user.oid == auth.LEGACY_OWNER_OID
+                    and (auth.SIGNUP_MODE != "open" or auth.is_home_tenant(user.tid))
                     and con.execute("SELECT 1 FROM series WHERE owner_oid='' LIMIT 1").fetchone()):
                 # #11/#70: series left over from before auth existed
                 # (owner_oid == '') go to the one person named in
@@ -476,7 +493,7 @@ def get_current_user(
                 # everything has been claimed.
                 con.execute("UPDATE series SET owner_oid=? WHERE owner_oid=''", (user.oid,))
         if epoch == _block_epoch:
-            _seen_users[key] = (user.email, user.display_name, now)
+            _seen_users[key] = (user.email, user.display_name, user.tid, now)
     return user
 
 
@@ -492,7 +509,10 @@ def require_person(user: auth.CurrentUser = Depends(get_current_user)) -> auth.C
 
 
 def is_admin(user: auth.CurrentUser) -> bool:
-    return auth.AUTH_MODE == "entra" and not user.is_pipeline and user.oid.lower() in auth.ADMIN_OIDS
+    # Open mode: an oid is only unique within its own tenant, so an admin must
+    # also be signed in from the home tenant (#90).
+    return (auth.AUTH_MODE == "entra" and not user.is_pipeline and user.oid.lower() in auth.ADMIN_OIDS
+            and (auth.SIGNUP_MODE != "open" or auth.is_home_tenant(user.tid)))
 
 
 def require_admin(user: auth.CurrentUser = Depends(require_person)) -> auth.CurrentUser:

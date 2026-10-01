@@ -59,6 +59,10 @@ services:
       # and LEGACY_OWNER_OID is who owns pre-sign-in series - see .env.example.
       ALLOWED_OIDS: ""
       LEGACY_OWNER_OID: ""
+      # "allowlist" (default) or "open" (any Microsoft account) - see .env.example
+      # before changing it. BLOCKED_TENANTS: tenant ids refused in open mode.
+      SIGNUP_MODE: "allowlist"
+      BLOCKED_TENANTS: ""
       # The pane's "Log Issue"/"Log Suggestion" buttons (#22) - a
       # fine-grained GitHub PAT, scoped to just this repo, Issues: write
       # only. Blank means filing returns 503 rather than crashing.

@@ -273,7 +273,8 @@ def _reload_with_env(monkeypatch, **env):
     return importlib.reload(auth)
 
 
-_AUTH_ENV_KEYS = ("AUTH_MODE", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS", "STORYBIBLE_TOKEN", "LEGACY_OWNER_OID")
+_AUTH_ENV_KEYS = ("AUTH_MODE", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS", "STORYBIBLE_TOKEN", "LEGACY_OWNER_OID",
+                  "SIGNUP_MODE", "BLOCKED_TENANTS")
 
 
 @pytest.fixture
@@ -432,3 +433,44 @@ def test_token_mode_compares_in_constant_time(monkeypatch):
     assert tc.get("/api/series", headers={"X-Token": "s3cret"}).status_code == 200
     assert tc.get("/api/series", headers={"X-Token": "sécret".encode("latin-1")}).status_code == 401  # non-ASCII must not 500
     assert len(calls) == 4
+
+
+# ------------------------------------------------- SIGNUP_MODE startup checks (#90)
+def test_signup_mode_defaults_to_allowlist(restore_auth_module, monkeypatch):
+    monkeypatch.delenv("SIGNUP_MODE", raising=False)
+    assert _reload_with_env(monkeypatch, ALLOWED_OIDS="a", **_ENTRA_ENV).SIGNUP_MODE == "allowlist"
+
+
+def test_signup_mode_rejects_unknown_values(restore_auth_module, monkeypatch):
+    with pytest.raises(RuntimeError, match="SIGNUP_MODE"):
+        _reload_with_env(monkeypatch, SIGNUP_MODE="anyone", ALLOWED_OIDS="a", **_ENTRA_ENV)
+
+
+def test_open_signup_requires_entra_auth(restore_auth_module, monkeypatch):
+    with pytest.raises(RuntimeError, match="SIGNUP_MODE=open requires AUTH_MODE=entra"):
+        _reload_with_env(monkeypatch, SIGNUP_MODE="open", AUTH_MODE="none")
+
+
+def test_open_signup_makes_allowed_oids_optional_but_keeps_the_tenant_and_client(restore_auth_module, monkeypatch):
+    monkeypatch.delenv("ALLOWED_OIDS", raising=False)
+    mod = _reload_with_env(monkeypatch, SIGNUP_MODE="open", **_ENTRA_ENV)
+    assert mod.SIGNUP_MODE == "open" and mod.ALLOWED_OIDS == set()
+    with pytest.raises(RuntimeError, match="ENTRA_TENANT_ID"):
+        _reload_with_env(monkeypatch, SIGNUP_MODE="open", **{**_ENTRA_ENV, "ENTRA_TENANT_ID": ""})
+    with pytest.raises(RuntimeError, match="GUID"):
+        _reload_with_env(monkeypatch, SIGNUP_MODE="open", **{**_ENTRA_ENV, "ENTRA_TENANT_ID": "contoso.onmicrosoft.com"})
+
+
+def test_allowlist_mode_startup_validation_is_unchanged(restore_auth_module, monkeypatch):
+    monkeypatch.delenv("ALLOWED_OIDS", raising=False)
+    with pytest.raises(RuntimeError, match="ALLOWED_OIDS"):
+        _reload_with_env(monkeypatch, SIGNUP_MODE="allowlist", **_ENTRA_ENV)
+    assert _reload_with_env(monkeypatch, SIGNUP_MODE="allowlist", ALLOWED_OIDS="*", **_ENTRA_ENV).ALLOWED_OIDS == set()
+
+
+def test_blocked_tenants_parsing_and_validation(restore_auth_module, monkeypatch):
+    t = "AAAAAAAA-1111-1111-1111-AAAAAAAAAAAA"
+    mod = _reload_with_env(monkeypatch, SIGNUP_MODE="open", BLOCKED_TENANTS=f" {t} , ,", **_ENTRA_ENV)
+    assert mod.BLOCKED_TENANTS == {t.lower()}
+    with pytest.raises(RuntimeError, match="BLOCKED_TENANTS"):
+        _reload_with_env(monkeypatch, SIGNUP_MODE="open", BLOCKED_TENANTS="contoso.com", **_ENTRA_ENV)
