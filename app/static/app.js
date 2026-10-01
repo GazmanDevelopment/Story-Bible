@@ -23,6 +23,9 @@ const S = {
 let msalPca = null;
 let msalAccount = null;
 
+// Help guide on GitHub Pages (#81).
+const HELP_URL = "https://gazmandevelopment.github.io/Story-Bible/help/";
+
 const REL_TYPES = ["married to", "partner of", "mistress of", "lover of", "ex of",
   "friend of", "best friend of", "sibling of", "parent of", "boss of", "colleague of",
   "neighbour of", "rival of", "flirts with"];
@@ -1032,6 +1035,12 @@ function wire() {
     S.tab = b.dataset.tab; S.view = null; S.filter = ""; render();
     revalidateBundle();  // (a no-op when the new tab opens a form, e.g. Series)
   }));
+  // A plain target=_blank link is unreliable in the Word task pane, so ask
+  // Office to open the system browser there.
+  $("#btnHelp").addEventListener("click", () => {
+    if (S.inWord && window.Office?.context?.ui?.openBrowserWindow) Office.context.ui.openBrowserWindow(HELP_URL);
+    else window.open(HELP_URL, "_blank", "noopener");
+  });
   $("#btnFind").addEventListener("click", () => findSelection().catch((e) => toast(e.message, "error")));
 }
 
