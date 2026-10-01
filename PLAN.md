@@ -142,7 +142,7 @@ the domain hosting the app that redirects to it.
 
 ### Ownership and sharing
 - Each series has an **owner**. By default only the owner sees it, so your series and hers stay separate.
-- **Share** from the Series tab: pick a known user (anyone who has signed in once) as **editor** or **viewer**. Records inherit their series' permissions. Only the owner can delete a series or change sharing.
+- **Share** from the Series tab: pick a contact (someone you already share a series with - `GET /api/users`) or find a new person by exact email (`GET /api/users/lookup`; no directory listing, #88) as **editor** or **viewer**. Records inherit their series' permissions. Only the owner can delete a series or change sharing.
 - `created_by` / `updated_by` on every record. The pane shows "edited by … 2 days ago".
 - Be upfront with her about one thing: whoever administers the TrueNAS box can read the SQLite file directly. Entra controls what the **app** shows, not what the server admin can see.
 

@@ -65,8 +65,8 @@ def _token(oid, **overrides):
     return jwt.encode(payload, _private_pem, algorithm="RS256")
 
 
-def _as(oid):
-    return {"Authorization": f"Bearer {_token(oid)}"}
+def _as(oid, **overrides):
+    return {"Authorization": f"Bearer {_token(oid, **overrides)}"}
 
 
 def _pipeline_headers():
@@ -342,11 +342,137 @@ def test_import_still_suffixes_a_collision_with_your_own_series():
 
 
 # ------------------------------------------------------------ users listing
-def test_list_users_returns_everyone_whos_signed_in():
+def _users(oid):
+    return {u["oid"] for u in c.get("/api/users", headers=_as(oid)).json()}
+
+
+def test_list_users_includes_the_caller():
     oid = "listed-user-oid"
     c.get("/api/me", headers=_as(oid))
-    oids = {u["oid"] for u in c.get("/api/users", headers=_as(oid)).json()}
-    assert oid in oids
+    assert oid in _users(oid)
+
+
+def test_list_users_hides_strangers_with_no_shared_series():
+    """#88: with open signup the users table holds strangers."""
+    a, b = "lonely-a", "lonely-b"
+    for oid in (a, b):
+        c.get("/api/me", headers=_as(oid))
+    c.post("/api/series", json={"data": {"name": "A's"}}, headers=_as(a))
+    c.post("/api/series", json={"data": {"name": "B's"}}, headers=_as(b))
+    assert b not in _users(a)
+    assert a not in _users(b)
+
+
+def test_list_users_shows_everyone_on_a_shared_series(series):
+    # owner sees members; members see the owner AND each other
+    assert {EDITOR_OID, VIEWER_OID} <= _users(OWNER_OID)
+    assert {OWNER_OID, VIEWER_OID} <= _users(EDITOR_OID)
+    assert {OWNER_OID, EDITOR_OID} <= _users(VIEWER_OID)
+
+
+def test_list_users_after_sharing_they_see_each_other_and_after_leaving_they_dont():
+    a, b = "contact-a", "contact-b"
+    for oid in (a, b):
+        c.get("/api/me", headers=_as(oid))
+    sid = c.post("/api/series", json={"data": {"name": "Contacts"}}, headers=_as(a)).json()["id"]
+    assert b not in _users(a)
+    c.put(f"/api/series/{sid}/members/{b}", json={"role": "viewer"}, headers=_as(a))
+    assert b in _users(a) and a in _users(b)
+    c.delete(f"/api/series/{sid}/members/{b}", headers=_as(a))
+    assert b not in _users(a) and a not in _users(b)
+
+
+def test_list_users_does_not_leak_through_a_series_you_cant_access(series):
+    assert OWNER_OID not in _users(OUTSIDER_OID)
+    assert EDITOR_OID not in _users(OUTSIDER_OID)
+
+
+def test_list_users_in_none_mode_still_lists_everyone(monkeypatch):
+    c.get("/api/me", headers=_as("none-mode-someone"))
+    monkeypatch.setattr(auth, "AUTH_MODE", "none")
+    oids = {u["oid"] for u in c.get("/api/users").json()}
+    assert "none-mode-someone" in oids
+
+
+# ------------------------------------------------------------ user lookup (#88)
+def test_lookup_finds_a_stranger_by_exact_email():
+    target = "lookup-target"
+    c.get("/api/me", headers=_as(target))
+    r = c.get("/api/users/lookup", params={"email": f"{target}@example.com"}, headers=_as("lookup-caller"))
+    assert r.status_code == 200
+    assert r.json()["oid"] == target
+
+
+def test_lookup_email_is_case_insensitive_and_trimmed():
+    target = "lookup-case"
+    c.get("/api/me", headers=_as(target))
+    r = c.get("/api/users/lookup", params={"email": f"  {target.upper()}@Example.COM "}, headers=_as("lookup-caller"))
+    assert r.status_code == 200 and r.json()["oid"] == target
+
+
+def test_lookup_by_exact_oid():
+    target = "lookup-by-oid"
+    c.get("/api/me", headers=_as(target))
+    r = c.get("/api/users/lookup", params={"oid": target}, headers=_as("lookup-caller"))
+    assert r.status_code == 200 and r.json()["email"] == f"{target}@example.com"
+
+
+@pytest.mark.parametrize("probe", ["lookup-par", "%", "_", "%@example.com", "lookup-par%", "lookup-par*", "@example.com"])
+def test_lookup_does_not_enumerate_by_partial_or_wildcard(probe):
+    c.get("/api/me", headers=_as("lookup-partial"))
+    r = c.get("/api/users/lookup", params={"email": probe}, headers=_as("lookup-caller"))
+    assert r.status_code == 404
+
+
+def test_lookup_oid_is_exact_not_a_wildcard():
+    c.get("/api/me", headers=_as("lookup-oid-x"))
+    assert c.get("/api/users/lookup", params={"oid": "%"}, headers=_as("lookup-caller")).status_code == 404
+    assert c.get("/api/users/lookup", params={"oid": "lookup-oid"}, headers=_as("lookup-caller")).status_code == 404
+
+
+def test_lookup_needs_exactly_one_of_email_or_oid():
+    h = _as("lookup-caller")
+    assert c.get("/api/users/lookup", headers=h).status_code == 400
+    assert c.get("/api/users/lookup", params={"email": "a@b.c", "oid": "x"}, headers=h).status_code == 400
+    assert c.get("/api/users/lookup", params={"email": ""}, headers=h).status_code == 400
+    assert c.get("/api/users/lookup", params={"email": "   "}, headers=h).status_code == 400
+
+
+def test_lookup_blank_email_does_not_match_accounts_with_no_email():
+    c.get("/api/me", headers=_as("lookup-no-email", preferred_username=""))
+    r = c.get("/api/users/lookup", params={"email": "  "}, headers=_as("lookup-caller"))
+    assert r.status_code == 400
+
+
+def test_lookup_duplicate_email_is_409_and_oid_still_works():
+    shared = "dupe@example.com"
+    for oid in ("dupe-guest", "dupe-member"):
+        c.get("/api/me", headers=_as(oid, preferred_username=shared))
+    h = _as("lookup-caller")
+    assert c.get("/api/users/lookup", params={"email": shared}, headers=h).status_code == 409
+    assert c.get("/api/users/lookup", params={"oid": "dupe-guest"}, headers=h).json()["email"] == shared
+
+
+def test_lookup_unknown_email_is_404():
+    r = c.get("/api/users/lookup", params={"email": "nobody@nowhere.example"}, headers=_as("lookup-caller"))
+    assert r.status_code == 404
+
+
+def test_pipeline_cannot_lookup_users():
+    r = c.get("/api/users/lookup", params={"email": "x@example.com"}, headers=_pipeline_headers())
+    assert r.status_code == 403
+
+
+def test_lookup_then_share_with_a_stranger():
+    """The flow the picker uses: find by email, then PUT the member."""
+    owner, stranger = "flow-owner", "flow-stranger"
+    for oid in (owner, stranger):
+        c.get("/api/me", headers=_as(oid))
+    sid = c.post("/api/series", json={"data": {"name": "Flow"}}, headers=_as(owner)).json()["id"]
+    found = c.get("/api/users/lookup", params={"email": f"{stranger}@example.com"}, headers=_as(owner)).json()
+    r = c.put(f"/api/series/{sid}/members/{found['oid']}", json={"role": "editor"}, headers=_as(owner))
+    assert r.status_code == 200
+    assert stranger in _users(owner)
 
 
 # --------------------------------------- #12's exact scenario, with real people
