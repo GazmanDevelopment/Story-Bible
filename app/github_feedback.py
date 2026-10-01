@@ -53,8 +53,13 @@ LABELS: dict[str, list[str]] = {
     "suggestion": ["enhancement", "area:pane"],
 }
 
-RATE_LIMIT_MAX_CALLS = 5           # per person, per window
-RATE_LIMIT_GLOBAL_MAX_CALLS = 20   # across everyone: bounds the damage from many accounts, or one compromised one
+# Env-overridable (#89). With open signup (#85) the global cap is a shared
+# resource a handful of throwaway accounts could exhaust (each takes its
+# per-person allowance) and lock everyone else out for the hour, so the default
+# leaves room for ~12 people at the per-person cap; MAX_USERS in app/main.py
+# bounds how many accounts there can be at all.
+RATE_LIMIT_MAX_CALLS = int(os.environ.get("FEEDBACK_RATE_LIMIT_PER_PERSON", 5))     # per person, per window
+RATE_LIMIT_GLOBAL_MAX_CALLS = int(os.environ.get("FEEDBACK_RATE_LIMIT_GLOBAL", 60))  # across everyone: bounds the damage from many accounts, or one compromised one
 RATE_LIMIT_WINDOW_SECONDS = 3600
 OUTBOUND_TIMEOUT_SECONDS = 10  # must not block the single uvicorn worker for long
 
@@ -144,6 +149,11 @@ class _RateLimiter:
         self._by_key.setdefault(key, []).append(ticket)
         self._all.append(ticket)
         return ticket
+
+    def global_full(self) -> bool:
+        """True if the overall ceiling (not the caller's own) is what is full."""
+        self._prune(time.monotonic())
+        return self.global_max_calls is not None and len(self._all) >= self.global_max_calls
 
     def refund(self, key: str, ticket: tuple[float, int]) -> None:
         if ticket in self._all:
@@ -249,6 +259,8 @@ async def file_feedback(feedback: FeedbackIn, user: auth.CurrentUser | None = No
     feedback.submitted_by = _public_name(user)
     ticket = _rate_limiter.reserve(key)
     if ticket is None:
+        if _rate_limiter.global_full():
+            raise HTTPException(429, "Feedback is very busy right now - try again later")
         raise HTTPException(429, "Too many feedback submissions - try again later")
     try:
         result = await _post_issue_to_github(token, feedback)

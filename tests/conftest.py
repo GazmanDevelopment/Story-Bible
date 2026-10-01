@@ -13,3 +13,15 @@ import os
 # Assigned, not setdefault: a stray ENABLE_API_DOCS=false in the developer's
 # shell would otherwise fail tests/test_openapi.py for an unrelated reason.
 os.environ["ENABLE_API_DOCS"] = "true"
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_write_rate_limit(monkeypatch):
+    """The per-person write limiter (#89) is in-process state that would
+    otherwise carry across tests, and the suite's many rapid writes as one test
+    person would trip it. tests/test_abuse_limits.py installs its own."""
+    from app import main
+    monkeypatch.setattr(main, "_write_limiter", None)

@@ -12,6 +12,19 @@ Env vars:
   MAX_BODY_BYTES    request body size cap, in bytes (default 5 MiB)
   MAX_RECORDS_PER_SERIES / MAX_SERIES_PER_OWNER  ceilings on how much one
                     series / one person can hold (defaults 20000 / 200, #71)
+  MAX_USERS         cap on total accounts (default 0 = unlimited). Once reached,
+                    a person who has never signed in is refused (403) at their
+                    first request; existing accounts are unaffected (#89)
+  MAX_BYTES_PER_OWNER  storage ceiling per person: the JSON stored in all
+                    series they own, shared records included (default
+                    500 MiB, 0 = off). Writes that would grow past it get a
+                    400; edits that shrink data and deletes always work (#89)
+  WRITE_RATE_LIMIT_PER_MINUTE  per-person ceiling on write requests (POST/PUT/
+                    DELETE) in AUTH_MODE=entra (default 120, 0 = off); over it
+                    gets 429 + Retry-After (#89)
+  FEEDBACK_RATE_LIMIT_PER_PERSON / FEEDBACK_RATE_LIMIT_GLOBAL  "Log Issue"
+                    filings per hour, per person / across everyone (defaults
+                    5 / 60; see app/github_feedback.py, #89)
   ENABLE_API_DOCS   serve /docs, /redoc and /openapi.json, unauthenticated
                     (default off - see API_DOCS_ENABLED, #68)
   IMPORT_MAX_BODY_BYTES  body size cap for /api/import specifically, in
@@ -93,6 +106,15 @@ IMPORT_MAX_BODY_BYTES = int(os.environ.get("IMPORT_MAX_BODY_BYTES", 20 * 1024 * 
 # runaway client or import loop can't fill the dataset.
 MAX_RECORDS_PER_SERIES = int(os.environ.get("MAX_RECORDS_PER_SERIES", 20_000))
 MAX_SERIES_PER_OWNER = int(os.environ.get("MAX_SERIES_PER_OWNER", 200))
+# Open-signup abuse limits (#89). 0 turns each one off.
+MAX_USERS = int(os.environ.get("MAX_USERS", 0))
+MAX_BYTES_PER_OWNER = int(os.environ.get("MAX_BYTES_PER_OWNER", 500 * 1024 * 1024))
+WRITE_RATE_LIMIT_PER_MINUTE = int(os.environ.get("WRITE_RATE_LIMIT_PER_MINUTE", 120))
+# Same sliding-window limiter the feedback route uses (no overall cap: this is
+# purely a per-person fairness limit). Per process, like _seen_users below -
+# right for the single worker. None = disabled.
+_write_limiter = (feedback_mod._RateLimiter(WRITE_RATE_LIMIT_PER_MINUTE, 60)
+                  if WRITE_RATE_LIMIT_PER_MINUTE > 0 else None)
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Record kinds that hang off a series
@@ -209,6 +231,30 @@ def check_series_quota(con, user: auth.CurrentUser) -> None:
     owned = con.execute("SELECT COUNT(*) FROM series WHERE owner_oid=?", (user.oid,)).fetchone()[0]
     if owned >= MAX_SERIES_PER_OWNER:
         raise HTTPException(400, f"Series limit reached ({owned} of {MAX_SERIES_PER_OWNER})")
+
+
+def owner_bytes(con, owner_oid: str) -> int:
+    """Bytes of JSON stored in every series `owner_oid` owns, their records
+    included (a shared series counts against its owner, not the editors)."""
+    return con.execute(
+        "SELECT COALESCE((SELECT SUM(LENGTH(CAST(data AS BLOB))) FROM series WHERE owner_oid=:o), 0) "
+        "     + COALESCE((SELECT SUM(LENGTH(CAST(data AS BLOB))) FROM records "
+        "                 WHERE series_id IN (SELECT id FROM series WHERE owner_oid=:o)), 0)",
+        {"o": owner_oid},
+    ).fetchone()[0]
+
+
+def check_storage_quota(con, owner_oid: str, adding: int) -> None:
+    """400 if storing `adding` more bytes would put `owner_oid` over
+    MAX_BYTES_PER_OWNER (#89). Call inside the write lock, and only for writes
+    that grow the data - shrinking an edit or deleting must always work, even
+    for someone already over the line."""
+    if MAX_BYTES_PER_OWNER <= 0 or adding <= 0:
+        return
+    used = owner_bytes(con, owner_oid)
+    if used + adding > MAX_BYTES_PER_OWNER:
+        raise HTTPException(400, f"Storage limit reached ({used // 1024 // 1024} MiB of "
+                                 f"{MAX_BYTES_PER_OWNER // 1024 // 1024} MiB used by this series' owner)")
 
 
 def iter_refs(kind: str, data: dict):
@@ -392,7 +438,12 @@ def get_current_user(
         seen = _seen_users.get(key)
         if seen and seen[:2] == (user.email, user.display_name) and now - seen[2] < LAST_SEEN_REFRESH_SECONDS:
             return user  # already recorded a moment ago: no connection, no write
-        with db() as con:
+        # write=True when capped so two first sign-ins can't both squeeze past
+        # MAX_USERS (#89); uncapped, this stays the cheap lazy transaction.
+        with db(write=MAX_USERS > 0) as con:
+            if MAX_USERS > 0 and not con.execute("SELECT 1 FROM users WHERE oid=?", (user.oid,)).fetchone():
+                if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] >= MAX_USERS:
+                    raise HTTPException(403, "This server is not accepting new accounts right now")
             upsert_user(con, user)
             if (auth.LEGACY_OWNER_OID and user.oid == auth.LEGACY_OWNER_OID
                     and con.execute("SELECT 1 FROM series WHERE owner_oid='' LIMIT 1").fetchone()):
@@ -416,6 +467,22 @@ def require_person(user: auth.CurrentUser = Depends(get_current_user)) -> auth.C
     if user.is_pipeline:
         raise HTTPException(403, "The review pipeline is read-only")
     return user
+
+
+def limit_writes(request: Request, user: auth.CurrentUser = Depends(get_current_user)) -> None:
+    """Per-person write rate limit (#89), a dependency on every POST/PUT/DELETE
+    route. Only in AUTH_MODE=entra: in none/token there is one shared identity,
+    so a "per person" limit would just throttle the one bible. Counted before
+    the handler runs, so a flood of rejected requests (403/409/...) is limited
+    too. Auth runs first (it's a dependency), so this never sees a bad token."""
+    if _write_limiter is None or auth.AUTH_MODE != "entra" or user.is_pipeline:
+        return
+    if _write_limiter.reserve(user.oid) is None:
+        raise HTTPException(429, "Too many changes in a short time - wait a moment and try again",
+                            headers={"Retry-After": "60"})
+
+
+WRITE_LIMIT = [Depends(limit_writes)]
 
 
 # -------------------------------------------------------------------------- app
@@ -928,13 +995,14 @@ def list_series(summary: bool = False, user: auth.CurrentUser = Depends(get_curr
     return sorted(out, key=lambda s: (s.get("name") or "").lower())
 
 
-@app.post("/api/series", tags=["series"])
+@app.post("/api/series", tags=["series"], dependencies=WRITE_LIMIT)
 def create_series(body: Body, user: auth.CurrentUser = Depends(require_person)):
     sid = new_id()
     data = validate_series(clean(body.data))
     now = time.time()
     with db(write=True) as con:
         check_series_quota(con, user)
+        check_storage_quota(con, user.oid, len(json.dumps(data)))
         con.execute(
             "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
             "VALUES (?,?,?,?,1,?,?)",
@@ -944,17 +1012,19 @@ def create_series(body: Body, user: auth.CurrentUser = Depends(require_person)):
             "created_by": user.oid, "updated_by": user.oid}
 
 
-@app.put("/api/series/{series_id}", tags=["series"])
+@app.put("/api/series/{series_id}", tags=["series"], dependencies=WRITE_LIMIT)
 def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     now = time.time()
     data = validate_series(clean(body.data))
-    with db() as con:
-        require_access(con, user, series_id, "write")
+    with db(write=True) as con:
+        row = require_access(con, user, series_id, "write")
         if body.version is None:
             raise HTTPException(428, "version is required")
+        encoded = json.dumps(data)
+        check_storage_quota(con, row["owner_oid"], len(encoded) - len(row["data"]))
         cur = con.execute(
             "UPDATE series SET data=?, updated=?, version=version+1, updated_by=? WHERE id=? AND version=?",
-            (json.dumps(data), now, user.oid, series_id, body.version),
+            (encoded, now, user.oid, series_id, body.version),
         )
         if cur.rowcount == 0:
             raise conflict(con, row_to_obj(get_series_or_404(con, series_id)))
@@ -966,7 +1036,7 @@ class DeletedOut(BaseModel):
     deleted: str
 
 
-@app.delete("/api/series/{series_id}", tags=["series"], response_model=DeletedOut)
+@app.delete("/api/series/{series_id}", tags=["series"], response_model=DeletedOut, dependencies=WRITE_LIMIT)
 def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
     with db() as con:
         require_access(con, user, series_id, "owner")
@@ -1033,7 +1103,7 @@ def bundle(series_id: str, request: Request, user: auth.CurrentUser = Depends(ge
     return JSONResponse(data, headers={"ETag": etag})
 
 
-@app.post("/api/import", tags=["series"])
+@app.post("/api/import", tags=["series"], dependencies=WRITE_LIMIT)
 def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(require_person)):
     """Restore an exported bundle as a NEW series (ids are remapped).
 
@@ -1110,6 +1180,7 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
     now = time.time()
     with db(write=True) as con:
         check_series_quota(con, user)  # again, now inside the write lock, so two imports can't both squeeze in
+        check_storage_quota(con, user.oid, len(json.dumps(sdata)) + sum(len(json.dumps(d)) for _, _, d in prepared))
         con.execute(
             "INSERT INTO series (id, data, updated, owner_oid, version, created_by, updated_by) "
             "VALUES (?,?,?,?,1,?,?)",
@@ -1157,7 +1228,7 @@ class MemberRoleOut(BaseModel):
     role: str
 
 
-@app.put("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=MemberRoleOut)
+@app.put("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=MemberRoleOut, dependencies=WRITE_LIMIT)
 def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUser = Depends(get_current_user)):
     if body.role not in ("editor", "viewer"):
         raise HTTPException(400, "role must be 'editor' or 'viewer'")
@@ -1175,7 +1246,7 @@ def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUse
     return {"oid": oid, "role": body.role}
 
 
-@app.delete("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=DeletedOut)
+@app.delete("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=DeletedOut, dependencies=WRITE_LIMIT)
 def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(get_current_user)):
     """The owner can remove anyone; anyone can remove themselves (leave)."""
     if user.is_pipeline:
@@ -1203,32 +1274,34 @@ def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(get
     return [row_to_obj(r) for r in rows]
 
 
-@app.post("/api/series/{series_id}/{kind}", tags=["records"])
+@app.post("/api/series/{series_id}/{kind}", tags=["records"], dependencies=WRITE_LIMIT)
 def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     rid, now = new_id(), time.time()
     data = validate_record(kind, clean(body.data))
     with db(write=True) as con:
-        require_access(con, user, series_id, "write")
+        row = require_access(con, user, series_id, "write")
         count = con.execute("SELECT COUNT(*) FROM records WHERE series_id=?", (series_id,)).fetchone()[0]
         if count >= MAX_RECORDS_PER_SERIES:
             raise HTTPException(400, f"This series already has {count} records, the limit is {MAX_RECORDS_PER_SERIES}")
         check_refs(con, series_id, kind, data)
+        encoded = json.dumps(data)
+        check_storage_quota(con, row["owner_oid"], len(encoded))
         con.execute(
             "INSERT INTO records (id, series_id, kind, data, updated, version, created_by, updated_by) "
             "VALUES (?,?,?,?,?,1,?,?)",
-            (rid, series_id, kind, json.dumps(data), now, user.oid, user.oid),
+            (rid, series_id, kind, encoded, now, user.oid, user.oid),
         )
     return {**data, "id": rid, "updated": now, "version": 1, "created_by": user.oid, "updated_by": user.oid}
 
 
-@app.put("/api/series/{series_id}/{kind}/{rid}", tags=["records"])
+@app.put("/api/series/{series_id}/{kind}/{rid}", tags=["records"], dependencies=WRITE_LIMIT)
 def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     now = time.time()
     data = validate_record(kind, clean(body.data))
     with db(write=True) as con:
-        require_access(con, user, series_id, "write")
+        row = require_access(con, user, series_id, "write")
         if body.version is None:
             raise HTTPException(428, "version is required")
         current = con.execute(
@@ -1240,10 +1313,13 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
             # character's cascade bumps the versions of what referenced it),
             # not a confusing 400 about a reference the user never touched.
             check_refs(con, series_id, kind, data, frozenset(iter_refs(kind, json.loads(current["data"]))))
+        encoded = json.dumps(data)
+        if current:
+            check_storage_quota(con, row["owner_oid"], len(encoded) - len(current["data"]))
         cur = con.execute(
             "UPDATE records SET data=?, updated=?, version=version+1, updated_by=? "
             "WHERE id=? AND series_id=? AND kind=? AND version=?",
-            (json.dumps(data), now, user.oid, rid, series_id, kind, body.version),
+            (encoded, now, user.oid, rid, series_id, kind, body.version),
         )
         if cur.rowcount == 0:
             existing = con.execute(
@@ -1256,7 +1332,7 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
     return updated
 
 
-@app.delete("/api/series/{series_id}/{kind}/{rid}", tags=["records"], response_model=DeletedOut)
+@app.delete("/api/series/{series_id}/{kind}/{rid}", tags=["records"], response_model=DeletedOut, dependencies=WRITE_LIMIT)
 def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = Depends(get_current_user)):
     check_kind(kind)
     with db() as con:
