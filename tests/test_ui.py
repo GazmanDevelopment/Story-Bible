@@ -487,6 +487,46 @@ def test_a_non_numeric_age_survives_saving_the_character(server, browser_page):
     assert not errors, errors
 
 
+def _search_titles(pg, text):
+    pg.fill("[data-act=filter]", text)
+    return pg.eval_on_selector_all(".list li .title", "els => els.map(e => e.textContent.trim())")
+
+
+def test_list_search_matches_visible_text_not_stored_json(server, browser_page):
+    """#129: search used to run over JSON.stringify(record), so field names,
+    ids and a research body's tags / image data matched too."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.evaluate("""async () => {
+        await api(`/series/${S.sid}/characters`, "POST", { data: { name: "Quoter", notes: 'she said "hi" twice',
+          custom: { Scar: "left cheek" } } });
+        const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        await api(`/series/${S.sid}/research`, "POST", { data: { title: "Harbour notes",
+          body: `<p><strong>lighthouse</strong> keeper</p><img src="${png}">` } });
+        await loadBundle(); render();
+    }""")
+    pg.wait_for_selector(".list li")
+
+    # Field names and ids are not searchable...
+    assert _search_titles(pg, "role") == []
+    assert _search_titles(pg, "created_by") == []
+    # ...visible text is, including custom values and text with quote characters.
+    assert any("Mark Hale" in t for t in _search_titles(pg, "protagonist"))
+    assert _search_titles(pg, "left cheek") == ["Quoter"]
+    assert _search_titles(pg, '"hi"') == ["Quoter"]
+
+    pg.click("#tabs >> text=Research")
+    pg.wait_for_selector(".list li")
+    assert _search_titles(pg, "lighthouse") == ["Harbour notes"]
+    assert _search_titles(pg, "keeper") == ["Harbour notes"]
+    # Tag names and image data are not text.
+    assert _search_titles(pg, "strong") == []
+    assert _search_titles(pg, "base64") == []
+    assert _search_titles(pg, "png") == []
+    assert not errors, errors
+
+
 def test_relationship_type_suggestions_are_editable_per_series(server, browser_page):
     """#63: the relationship type field was always free text (nothing
     stopped typing "enemy of" before this) - what was missing was a way to
