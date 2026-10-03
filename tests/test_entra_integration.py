@@ -71,7 +71,8 @@ def test_config_endpoint_needs_no_auth_and_reflects_auth_mode(entra_mode):
     assert r.status_code == 200
     assert r.json() == {"authMode": "entra", "tenantId": TENANT, "clientId": CLIENT_ID,
                         "authority": f"https://login.microsoftonline.com/{TENANT}",
-                        "privacyUrl": "", "termsUrl": "", "policyVersion": main.POLICY_VERSION}
+                        "privacyUrl": "", "termsUrl": "", "policyVersion": main.POLICY_VERSION,
+                        "buildVersion": main.BUILD_VERSION, "buildDate": main.BUILD_DATE}
 
 
 def test_config_authority_is_common_in_open_signup_mode(entra_mode, monkeypatch):

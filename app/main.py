@@ -112,7 +112,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import __version__
+from . import __version__, BUILD_VERSION, BUILD_DATE
 from . import auth
 from . import backup as backup_mod
 from . import github_feedback as feedback_mod
@@ -1001,6 +1001,8 @@ class HealthResponse(BaseModel):
     ok: bool
     auth: bool
     version: str
+    build: str = ""       # build stamp (#144)
+    buildDate: str = ""
     backup_ok: bool
 
 
@@ -1014,7 +1016,7 @@ def health():
     # yet for up to a day. Monitoring alerts on backup_ok=false separately
     # (docs/MONITORING.md).
     body: dict[str, Any] = {"ok": True, "auth": auth.AUTH_MODE != "none", "version": __version__,
-                            "backup_ok": _backup_ok()}
+                            "build": BUILD_VERSION, "buildDate": BUILD_DATE, "backup_ok": _backup_ok()}
     if not _db_ok():
         body.update(ok=False, error="database unavailable")
         return JSONResponse(body, status_code=503)
@@ -1033,6 +1035,8 @@ class ConfigOut(BaseModel):
     privacyUrl: str = ""    # optional legal links shown before first sign-in
     termsUrl: str = ""
     policyVersion: str = ""  # current privacy policy / terms version (#111)
+    buildVersion: str = ""   # build stamp shown in the pane (#144)
+    buildDate: str = ""
 
 
 def _https_url(name: str) -> str:
@@ -1059,6 +1063,8 @@ def get_config():
         "privacyUrl": _https_url("PRIVACY_URL"),
         "termsUrl": _https_url("TERMS_URL"),
         "policyVersion": POLICY_VERSION,
+        "buildVersion": BUILD_VERSION,
+        "buildDate": BUILD_DATE,
     }
 
 

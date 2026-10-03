@@ -93,7 +93,7 @@ jobs:
           find app -type d -exec chmod 700 {} +
 
       - name: Build image
-        run: docker build -t story-bible:ci .
+        run: docker build --build-arg BUILD_VERSION="ci-${GITHUB_SHA::7}" --build-arg BUILD_DATE="$(date -u +%Y-%m-%d)" -t story-bible:ci .
 
       - name: Validate deploy/compose.yaml.example (#6)
         # Self-contained (no env_file - #36), so no setup needed beforehand.

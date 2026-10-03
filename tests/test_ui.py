@@ -91,7 +91,8 @@ def server(tmp_path):
     # locally (e.g. from testing the token-auth deploy path) would
     # otherwise silently flip the spawned server into AUTH_MODE=token,
     # and every call this walkthrough makes (no X-Token header) would 401.
-    env = {**os.environ, "STORYBIBLE_DB": db_path, "AUTH_MODE": "none"}
+    env = {**os.environ, "STORYBIBLE_DB": db_path, "AUTH_MODE": "none",
+           "BUILD_VERSION": "v0.1.0-7-gabc1234", "BUILD_DATE": "2026-10-03"}
     for var in ("STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS"):
         env.pop(var, None)
     try:
@@ -824,6 +825,21 @@ def test_feedback_form_warns_that_it_is_posted_publicly(server, browser_page):
     assert "story text" in notice
     assert "display name" not in notice     # no real identity outside Entra mode: nothing is added
     assert pg.is_visible("[data-role=public-notice]")
+    assert not errors, errors
+
+
+def test_build_version_and_date_show_on_the_series_tab_and_feedback_form(server, browser_page):
+    """#144"""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    assert pg.inner_text("[data-role=build-info]") == "Build v0.1.0-7-gabc1234 · 2026-10-03"
+    pg.click("[data-act=log-issue]")
+    pg.wait_for_selector("form[data-kind=feedback]")
+    assert pg.inner_text("[data-role=build-info]") == "Build v0.1.0-7-gabc1234 · 2026-10-03"
+    assert "build version and date are added" in pg.inner_text("[data-role=public-notice]")
     assert not errors, errors
 
 
