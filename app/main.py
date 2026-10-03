@@ -1424,20 +1424,24 @@ def delete_series(series_id: str, user: auth.CurrentUser = Depends(require_polic
 
 def bundle_etag(con, series_row: sqlite3.Row) -> str:
     """A cheap validator for GET /bundle (#72): the series' version and owner
-    plus every record's (id, version), and the users table (display names
-    appear in the bundle's `people` map). Every write bumps a version, so
-    anything that would change the bundle changes this; nothing here parses a
-    record's JSON. Weak (`W/`): the body also carries an `exported` timestamp,
-    so it is equivalent, not byte-identical, between responses. Cost is one
-    pass over (id, version) for the series plus the users table (a handful of
-    rows); a display-name change invalidates every series' validator, which
-    only costs those clients one re-download."""
+    plus every record's (id, version, created_by, updated_by), and the display
+    name of each of those people - exactly what the body's `people` map holds.
+    Every write bumps a version, so anything that would change the bundle
+    changes this; nothing here parses a record's JSON. Weak (`W/`): the body
+    also carries an `exported` timestamp, so it is equivalent, not
+    byte-identical, between responses. Cost scales with the series, not with
+    the users table (#132): a sign-up, or a rename of someone who never
+    touched this series, leaves its validator alone."""
     h = hashlib.blake2b(digest_size=16)
     h.update(f"{__version__}|{series_row['id']}|{series_row['version']}|{series_row['owner_oid']}".encode())
-    for r in con.execute("SELECT id, version FROM records WHERE series_id=? ORDER BY id", (series_row["id"],)):
+    oids = {series_row["created_by"], series_row["updated_by"]}
+    for r in con.execute(
+        "SELECT id, version, created_by, updated_by FROM records WHERE series_id=? ORDER BY id", (series_row["id"],)
+    ):
         h.update(f"|{r['id']}:{r['version']}".encode())
-    for r in con.execute("SELECT oid, display_name FROM users ORDER BY oid"):
-        h.update(f"|{r['oid']}={r['display_name']}".encode())
+        oids.update((r["created_by"], r["updated_by"]))
+    for oid in sorted(o for o in oids if o):
+        h.update(f"|{oid}={display_name_for(con, oid)}".encode())
     return f'W/"{h.hexdigest()}"'
 
 
