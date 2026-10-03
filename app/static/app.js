@@ -631,6 +631,11 @@ function renderForm() {
   return "";
 }
 
+// #128: the server stores age as free text (older data and imports may hold "30s" or
+// "unknown"), but the Age field is a number input, which shows - and so would save -
+// such a value as blank. A non-numeric stored age is kept until a number is entered.
+const legacyAge = (c) => (c && c.age && !/^\d+$/.test(String(c.age).trim()) ? String(c.age) : "");
+
 function characterForm(c, isNew) {
   const tmpl = S.b.series.character_fields || [];
   const custom = c.custom || {};
@@ -644,8 +649,9 @@ function characterForm(c, isNew) {
     <div class="grid2">${field("name", "Name", c.name, "text", "", true)}${field("role", "Role", c.role, "text", 'placeholder="e.g. Protagonist"')}</div>
     ${field("aliases", "Nicknames / aliases (comma separated)", c.aliases)}
     <h3>Basics</h3>
-    <div class="grid3">${field("age", "Age at start", c.age, "number")}${field("height", "Height", c.height)}${field("gender", "Gender", c.gender)}</div>
+    <div class="grid3">${field("age", "Age at start", legacyAge(c) ? "" : c.age, "number")}${field("height", "Height", c.height)}${field("gender", "Gender", c.gender)}</div>
     <div class="grid3">${field("hair", "Hair", c.hair)}${field("eyes", "Eyes", c.eyes)}${field("style", "Style", c.style, "text", 'placeholder="goth, natural…"')}</div>
+    ${legacyAge(c) ? `<div class="hint" data-role="legacy-age">The age stored for this character, "${esc(legacyAge(c))}", isn't a number. It is kept until you enter one.</div>` : ""}
     <h3>Physical detail</h3>
     <div class="kv" id="customFields">${keys.map((k) => `
       <span class="hint" style="margin:6px 0 0">${esc(k)}</span>
@@ -1114,6 +1120,7 @@ async function save(kind, form) {
   }
   if (S.view.id) {
     const prev = rec(kind, S.view.id);
+    if (kind === "characters" && !data.age && legacyAge(prev)) data.age = prev.age;  // #128
     let saved;
     try {
       saved = await api(`/series/${S.sid}/${kind}/${S.view.id}`, "PUT", { data: { ...prev, ...data }, version: prev.version });

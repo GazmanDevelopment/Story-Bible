@@ -456,6 +456,37 @@ def test_adding_and_removing_a_chapter_keeps_unsaved_series_edits(server, browse
     assert not errors, errors
 
 
+def test_a_non_numeric_age_survives_saving_the_character(server, browser_page):
+    """#128: Age is a number input, so a stored "30s" showed blank and the next
+    save of the character wrote "" over it."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    sid = pg.evaluate("S.sid")
+    rid = pg.evaluate("S.view.id")
+    prev = pg.evaluate("rec('characters', S.view.id)")
+    pg.evaluate("""async ([sid, rid, prev]) => { await api(`/series/${sid}/characters/${rid}`, "PUT",
+        { data: { ...prev, age: "mid-30s" }, version: prev.version }); await loadBundle(); render(); }""",
+                [sid, rid, prev])
+    pg.wait_for_selector("[data-role=legacy-age]")
+    assert pg.input_value("[data-f=age]") == ""
+    assert "mid-30s" in pg.inner_text("[data-role=legacy-age]")
+
+    pg.fill("[data-f=notes]", "Edited something unrelated")
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#toast.show")
+    assert pg.evaluate("rec('characters', S.view.id).age") == "mid-30s"
+
+    # Entering a number replaces it (and the note goes away).
+    pg.fill("[data-f=age]", "36")
+    pg.click("[data-act=save]")
+    pg.wait_for_function("() => rec('characters', S.view.id).age === '36'")
+    assert pg.locator("[data-role=legacy-age]").count() == 0
+    assert not errors, errors
+
+
 def test_relationship_type_suggestions_are_editable_per_series(server, browser_page):
     """#63: the relationship type field was always free text (nothing
     stopped typing "enemy of" before this) - what was missing was a way to
