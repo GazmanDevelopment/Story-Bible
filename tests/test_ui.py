@@ -391,6 +391,71 @@ def test_unsaved_changes_guard_covers_series_settings_tab(server, browser_page):
     assert not errors, errors
 
 
+def test_adding_and_removing_a_relationship_keeps_unsaved_edits(server, browser_page):
+    """#127: add/remove relationship re-rendered the character form from saved
+    data, silently discarding anything typed and quieting the unsaved guard."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("text=Betsy Marr")
+    pg.wait_for_selector("form[data-kind=characters]")
+    # Save a custom value first, so clearing it below is a real unsaved edit.
+    first_custom = pg.locator("[data-custom]").first
+    first_custom.fill("saved value")
+    pg.click("[data-act=save]")
+    pg.wait_for_selector("#toast.show")
+    assert pg.locator("[data-custom]").first.input_value() == "saved value"
+    pg.locator("[data-custom]").first.fill("")  # cleared, not saved
+    pg.fill("[data-f=backstory]", "Typed but not saved")
+    pg.fill("#newFieldName", "Scar")
+    pg.click("[data-act=add-field]")
+    pg.fill("[data-custom=Scar]", "left cheek")
+
+    before = pg.locator(".rel [data-act=del-rel]").count()
+    pg.fill("#relType", "rival of")
+    pg.select_option("#relTo", index=1)
+    pg.click("[data-act=add-rel]")
+    pg.wait_for_function("n => document.querySelectorAll('[data-act=del-rel]').length === n + 1", arg=before)
+    assert pg.input_value("[data-f=backstory]") == "Typed but not saved"
+    assert pg.input_value("[data-custom=Scar]") == "left cheek"
+    assert pg.locator("[data-custom]").first.input_value() == ""
+
+    pg.locator("[data-act=del-rel]").first.click()
+    pg.wait_for_function("n => document.querySelectorAll('[data-act=del-rel]').length === n", arg=before)
+    assert pg.input_value("[data-f=backstory]") == "Typed but not saved"
+
+    # Still dirty: leaving the form prompts rather than silently dropping the edit.
+    pg.click("[data-act=cancel]")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")
+    assert not errors, errors
+
+
+def test_adding_and_removing_a_chapter_keeps_unsaved_series_edits(server, browser_page):
+    """#127: same, for the Series settings form."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    pg.fill("[data-f=description]", "Premise typed but not saved")
+    pg.fill("[data-f=character_fields]", "Build\nScars")
+    before = pg.locator("[data-act=del-chapter]").count()
+
+    pg.fill("#chTitle", "Brand new chapter")
+    pg.click("[data-act=add-chapter]")
+    pg.wait_for_function("n => document.querySelectorAll('[data-act=del-chapter]').length === n + 1", arg=before)
+    assert pg.input_value("[data-f=description]") == "Premise typed but not saved"
+    assert pg.input_value("[data-f=character_fields]") == "Build\nScars"
+
+    pg.locator("[data-act=del-chapter]").last.click()
+    pg.wait_for_function("n => document.querySelectorAll('[data-act=del-chapter]').length === n", arg=before)
+    assert pg.input_value("[data-f=description]") == "Premise typed but not saved"
+
+    pg.click("#tabs >> text=Characters")
+    pg.wait_for_selector("#modalOverlay:not([hidden])")  # still counted as unsaved
+    assert not errors, errors
+
+
 def test_relationship_type_suggestions_are_editable_per_series(server, browser_page):
     """#63: the relationship type field was always free text (nothing
     stopped typing "enemy of" before this) - what was missing was a way to

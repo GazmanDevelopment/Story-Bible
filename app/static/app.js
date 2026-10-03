@@ -452,6 +452,42 @@ function isDirty() {
   if (!form || S.formSnapshot == null) return false;
   return JSON.stringify(readForm(form)) !== S.formSnapshot;
 }
+// #127: actions inside an open form that change something *else* (add/remove a
+// relationship, add/remove a chapter) re-render the form from saved data, which
+// threw away anything typed but not yet saved - and re-baselined the snapshot, so
+// the unsaved-changes guard stayed quiet too. This puts the typed values back
+// into the freshly rendered form and keeps the original snapshot, so it still
+// counts as dirty. Forms with a rich-text editor (Research) don't use it.
+function customFieldHtml(name, value = "") {
+  return `<span class="hint" style="margin:6px 0 0">${esc(name)}</span><input data-custom="${esc(name)}" value="${esc(value)}"><span></span>`;
+}
+function rerenderKeepingEdits() {
+  const form = $("main form");
+  const typed = form ? readForm(form) : null, snapshot = S.formSnapshot;
+  render();
+  const next = $("main form");
+  if (!typed || !next || next.dataset.kind !== form.dataset.kind) return;
+  next.querySelectorAll("[data-f]").forEach((el) => {
+    const v = typed[el.dataset.f];
+    if (v === undefined) return;
+    el.value = Array.isArray(v) ? v.join("\n") : v;  // series list fields are textareas, one per line
+  });
+  next.querySelectorAll("[data-chips]").forEach((el) => {
+    const on = typed[el.dataset.chips] || [];
+    el.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", on.includes(c.dataset.id)));
+  });
+  const box = next.querySelector("#customFields");
+  // readForm leaves emptied custom fields out of `typed`, so an input with no entry
+  // there was cleared by the user and must not pick its saved value back up.
+  const typedCustom = typed.custom || {};
+  next.querySelectorAll("[data-custom]").forEach((el) => { el.value = typedCustom[el.dataset.custom] ?? ""; });
+  Object.entries(typedCustom).forEach(([k, v]) => {
+    if (![...next.querySelectorAll("[data-custom]")].some((el) => el.dataset.custom === k)) {
+      box?.insertAdjacentHTML("beforeend", customFieldHtml(k, v));
+    }
+  });
+  S.formSnapshot = snapshot;
+}
 async function confirmDiscard() {
   if (!isDirty()) return true;
   return showModal("You have unsaved changes. Discard them?", "Discard");
@@ -948,8 +984,7 @@ async function onClick(ev) {
       }
       case "add-field": {
         const name = $("#newFieldName").value.trim(); if (!name) return;
-        $("#customFields").insertAdjacentHTML("beforeend",
-          `<span class="hint" style="margin:6px 0 0">${esc(name)}</span><input data-custom="${esc(name)}"><span></span>`);
+        $("#customFields").insertAdjacentHTML("beforeend", customFieldHtml(name));
         $("#newFieldName").value = ""; break;
       }
       case "add-rel": {
@@ -957,20 +992,20 @@ async function onClick(ev) {
         if (!type || !to) { toast("Pick a type and a character"); return; }
         const created = await api(`/series/${S.sid}/relationships`, "POST",
           { data: { from: S.view.id, to, type, note: $("#relNote").value.trim() } });
-        putLocal("relationships", created); render(); break;
+        putLocal("relationships", created); rerenderKeepingEdits(); break;
       }
       case "del-rel": {
         await api(`/series/${S.sid}/relationships/${t.dataset.id}`, "DELETE");
         // Nothing references a relationship, so there's no server cascade to fetch.
         S.b.relationships = S.b.relationships.filter((x) => x.id !== t.dataset.id); S.bEtag = null; bundleGen++;
-        render(); break;
+        rerenderKeepingEdits(); break;
       }
       case "add-chapter": {
         const title = $("#chTitle").value.trim(); if (!title) return;
         putLocal("chapters", await api(`/series/${S.sid}/chapters`, "POST", { data: { number: Number($("#chNum").value) || 0, title } }));
-        render(); break;
+        rerenderKeepingEdits(); break;
       }
-      case "del-chapter": await api(`/series/${S.sid}/chapters/${t.dataset.id}`, "DELETE"); await loadBundle(); render(); break;
+      case "del-chapter": await api(`/series/${S.sid}/chapters/${t.dataset.id}`, "DELETE"); await loadBundle(); rerenderKeepingEdits(); break;
       case "doc-link": saveDocLink({ series_id: S.sid, chapter_id: "" }); render(); break;
       case "insert": await insertText(t.dataset.text); break;
       case "export": {
