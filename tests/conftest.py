@@ -25,6 +25,7 @@ def _no_write_rate_limit(monkeypatch):
     person would trip it. tests/test_abuse_limits.py installs its own."""
     from app import main
     monkeypatch.setattr(main, "_write_limiter", None)
+    monkeypatch.setattr(main, "_lookup_limiter", None)  # #131; tests/test_ownership.py installs its own
 
 
 @pytest.fixture(autouse=True)
