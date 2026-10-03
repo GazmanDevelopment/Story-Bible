@@ -149,13 +149,15 @@ Rolling back is a config change: set `SIGNUP_MODE=allowlist`. Accounts already c
 
 #### Go-live checklist (the gate for #85; tracked on #92)
 - [ ] WP1-WP4 (#88, #89, #90, #91) merged.
-- [ ] #100: privacy policy and terms published, linked from the pane and sign-in dialog, first-sign-in acknowledgement working.
+- [ ] #100 and its sub-issues: privacy policy and terms published, linked from the pane and sign-in dialog, first-sign-in acknowledgement working and enforced by the API (#111, #130), policy checked against behaviour (#115).
+- [ ] #114 operational items: [docs/PROCESSING.md](docs/PROCESSING.md) reviewed (its "Open points" resolved: the mail provider named and the server's country stated in `docs/privacy.html`, with `POLICY_VERSION` bumped so people accept the corrected policy), [docs/BREACH.md](docs/BREACH.md) read and the breach log started, and the UK ICO data protection fee decision recorded in PROCESSING.md.
 - [ ] #86 (delete my account) landed: it is the GDPR erasure right, required **before** the announcement.
 - [ ] #82 (admin view/block) landed, and the policy discloses the administrator's access.
 - [ ] Backup retention vs. erasure decided and documented in [docs/BACKUP.md](docs/BACKUP.md) / [docs/RESTORE.md](docs/RESTORE.md); deleted accounts must not reappear after a restore.
-- [ ] Proxy and container log retention confirmed (IP addresses are personal data) and stated in the policy.
+- [ ] Proxy and container log retention set to 30 days or less and recorded in the table in [docs/PROCESSING.md](docs/PROCESSING.md) (IP addresses are personal data; the policy states 30 days).
+- [ ] `BACKUP_KEEP_DAYS` is 14 (the default) wherever it is set, and any snapshots or off-box copies are no longer-lived than the policy says.
 - [ ] Reverse proxy / DDoS protection reviewed for a public box.
-- [ ] Entra changes above done; publisher verification decided.
+- [ ] Entra changes above done, including the **Privacy statement** and **Terms of service** URLs (item 5); publisher verification decided.
 - [ ] `MAX_USERS` and `BLOCKED_TENANTS` chosen.
 - [ ] Tested with a personal Microsoft account and a second tenant with `SIGNUP_MODE=open` before announcing.
 - [ ] Then flip `SIGNUP_MODE=open` in production.
