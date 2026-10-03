@@ -497,13 +497,35 @@ function toolbar(kind, placeholder, extra = "") {
   return `<div class="toolbar"><input data-act="filter" placeholder="${placeholder}" value="${esc(S.filter)}">
     ${extra}<button class="primary" data-act="new" data-kind="${kind}">+ Add</button></div>`;
 }
-function matches(r) {
+// #129: the list search looks at the text a person can see, per kind - not the
+// record's JSON, which also holds field names ("role", "notes"), ids, audit
+// fields and a research body's tags and base64 image data.
+const SEARCH_FIELDS = {
+  characters: ["name", "role", "aliases", "age", "height", "gender", "hair", "eyes", "style",
+    "preferences", "backstory", "notes"],
+  locations: ["name", "place", "description", "relevance", "notes"],
+  events: ["title", "description"],
+  research: ["title", "date_entered"],
+};
+const searchCache = new WeakMap();  // record object -> lower-cased text; records are replaced, never edited in place
+function searchText(kind, r) {
+  let t = searchCache.get(r);
+  if (t === undefined) {
+    const parts = SEARCH_FIELDS[kind].map((f) => r[f]);
+    if (kind === "characters") parts.push(...Object.values(r.custom || {}));
+    if (kind === "research") parts.push(htmlText(r.body));
+    t = parts.filter(Boolean).join("\n").toLowerCase();
+    searchCache.set(r, t);
+  }
+  return t;
+}
+function matches(kind, r) {
   if (!S.filter) return true;
-  return JSON.stringify(r).toLowerCase().includes(S.filter.toLowerCase());
+  return searchText(kind, r).includes(S.filter.toLowerCase());
 }
 
 function listCharacters() {
-  const items = S.b.characters.filter(matches).sort(byName);
+  const items = S.b.characters.filter((r) => matches("characters", r)).sort(byName);
   return toolbar("characters", "Search characters…") + (items.length
     ? `<ul class="list">${items.map((c) => `<li data-act="open" data-kind="characters" data-id="${c.id}">
         <div class="title">${esc(c.name)} ${c.role ? `<span class="sub">· ${esc(c.role)}</span>` : ""}</div>
@@ -514,7 +536,7 @@ function listCharacters() {
 }
 
 function listLocations() {
-  const items = S.b.locations.filter(matches).sort(byName);
+  const items = S.b.locations.filter((r) => matches("locations", r)).sort(byName);
   return toolbar("locations", "Search places…") + (items.length
     ? `<ul class="list">${items.map((l) => `<li data-act="open" data-kind="locations" data-id="${l.id}">
         <div class="title">${esc(l.name)}</div>
@@ -537,7 +559,7 @@ function listEvents() {
     : "";
   const tlMatch = (e) => chars.every((id) => (e.character_ids || []).includes(id)) &&
     (!locs.length || locs.includes(e.location_id));
-  const items = S.b.events.filter(matches)
+  const items = S.b.events.filter((r) => matches("events", r))
     .filter((e) => !S.tlChapter || e.chapter_id === S.tlChapter)
     .sort((a, b) => sortKey(a) - sortKey(b));
   const filtering = chars.length || locs.length;
@@ -564,19 +586,22 @@ function listEvents() {
 }
 
 function todayIso() { return new Date().toISOString().slice(0, 10); }
-function textPreview(html, max = 140) {
+function htmlText(html) {
   // <template>.content is an inert DocumentFragment - unlike a plain <div>,
   // setting innerHTML here never fetches/decodes any <img> the body has,
   // even briefly, since it's never part of the render tree.
   const tpl = document.createElement("template"); tpl.innerHTML = html || "";
-  const t = (tpl.content.textContent || "").replace(/\s+/g, " ").trim();
+  return (tpl.content.textContent || "").replace(/\s+/g, " ").trim();
+}
+function textPreview(html, max = 140) {
+  const t = htmlText(html);
   return t.length > max ? t.slice(0, max) + "…" : t;
 }
 
 function listResearch() {
   const sortOpts = [["date_desc", "Newest first"], ["date_asc", "Oldest first"], ["title", "Title A–Z"]]
     .map(([v, label]) => `<option value="${v}" ${S.rsSort === v ? "selected" : ""}>${label}</option>`).join("");
-  const items = S.b.research.filter(matches).sort((a, b) => {
+  const items = S.b.research.filter((r) => matches("research", r)).sort((a, b) => {
     if (S.rsSort === "title") return (a.title || "").localeCompare(b.title || "");
     const cmp = (a.date_entered || "").localeCompare(b.date_entered || "");
     return S.rsSort === "date_asc" ? cmp : -cmp;
