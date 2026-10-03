@@ -356,3 +356,30 @@ def test_import_finds_name_collisions_only_among_visible_series_using_sql():
     c.post("/api/series", json={"data": {"name": "Only Theirs"}}, headers=other)
     assert c.post("/api/import", json={"series": {"name": "Collide"}}, headers=owner).json()["name"] == "Collide (imported)"
     assert c.post("/api/import", json={"series": {"name": "Only Theirs"}}, headers=owner).json()["name"] == "Only Theirs"
+
+
+def test_an_unrelated_user_signing_in_or_renaming_leaves_the_etag_alone():
+    """#132: the validator covers only the people in the series, so another
+    account appearing (or being renamed) must not force a re-download."""
+    h = _as("perf-n", name="Author")
+    sid, _ = _series_with(h)
+    etag = _etag(h, sid)
+    _as("perf-n-stranger", name="Before")
+    c.get("/api/series", headers=_as("perf-n-stranger", name="Before"))  # signs the stranger in
+    c.get("/api/series", headers=_as("perf-n-stranger", name="After"))   # ...and renames them
+    assert _etag(h, sid) == etag
+    again = c.get(f"/api/series/{sid}/bundle", headers={**h, "If-None-Match": etag})
+    assert again.status_code == 304
+
+
+def test_renaming_a_record_editor_changes_the_etag():
+    h = _as("perf-o", name="Owner")
+    sid, _ = _series_with(h)
+    editor = _as("perf-o-editor", name="Ed")
+    c.get("/api/series", headers=editor)  # sign the editor in so they can be added
+    c.put(f"/api/series/{sid}/members/perf-o-editor", json={"role": "editor"}, headers=h)
+    loc = c.post(f"/api/series/{sid}/locations", json={"data": {"name": "L"}}, headers=editor)
+    assert loc.status_code == 200, loc.text
+    before = _etag(h, sid)
+    c.get("/api/series", headers=_as("perf-o-editor", name="Edward"))
+    assert _etag(h, sid) != before
