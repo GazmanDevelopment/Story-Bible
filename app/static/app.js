@@ -100,6 +100,11 @@ async function api(path, method = "GET", body, opts = {}) {
         message = res.status === 403 ? `You don't have access: ${detail}` : detail;
       } else if (res.status === 409 && detail?.error === "conflict") {
         message = `Changed by ${detail.updated_by || "someone else"} since you loaded it`;
+      } else if (res.status === 403 && detail?.error === "policy_not_accepted") {
+        // The server enforces acceptance too (the policy changed since this pane
+        // loaded, say): bring the acceptance screen back rather than a raw error.
+        message = "Please accept the privacy policy and terms to continue";
+        S.me = { ...(S.me || {}), policyCurrent: false }; S.view = null; render();
       }
     } catch { /* not JSON - fall back to the raw text above */ }
     const err = new Error(message);

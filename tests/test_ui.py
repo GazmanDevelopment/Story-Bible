@@ -1067,6 +1067,26 @@ def test_policy_gate_blocks_the_pane_until_accepted(server, browser_page):
     assert not errors, errors
 
 
+def test_a_server_refusal_for_policy_brings_the_gate_back(server, browser_page):
+    """#130: the API now enforces acceptance, so a 403 policy_not_accepted (the
+    policy changed while the pane was open) must show the acceptance screen,
+    not a raw JSON error."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.route("**/api/series?summary=true", lambda route: route.fulfill(
+        status=403, json={"detail": {"error": "policy_not_accepted", "policyVersion": "2.0"}}))
+    pg.evaluate("""() => {
+        S.config = { ...S.config, authMode: "entra", policyVersion: "2.0" };
+        S.me = { oid: "me", email: "me@x.com", isAdmin: false, policyCurrent: true };
+        msalAccount = { name: "Me" };
+    }""")
+    message = pg.evaluate("""async () => { try { await loadSeriesList(); return "no error"; } catch (e) { return e.message; } }""")
+    assert message == "Please accept the privacy policy and terms to continue"
+    pg.wait_for_selector("[data-act=accept-policy]")
+    assert not errors or all("403" in e for e in errors), errors
+
+
 def test_policy_gate_is_skipped_when_already_current(server, browser_page):
     pg, errors = browser_page
     pg.goto(server)

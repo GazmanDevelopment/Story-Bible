@@ -25,3 +25,14 @@ def _no_write_rate_limit(monkeypatch):
     person would trip it. tests/test_abuse_limits.py installs its own."""
     from app import main
     monkeypatch.setattr(main, "_write_limiter", None)
+
+
+@pytest.fixture(autouse=True)
+def policy_gate_open(monkeypatch):
+    """Server-side policy enforcement (#130) 403s anyone who hasn't accepted the
+    current privacy policy, and almost no test is about that - they sign in as an
+    arbitrary person and then exercise something else. So by default everyone
+    counts as accepted. tests/test_policy_acceptance.py overrides this fixture
+    (same name) to test the real gate."""
+    from app import main
+    monkeypatch.setattr(main, "policy_accepted", lambda user: True)

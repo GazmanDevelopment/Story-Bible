@@ -61,7 +61,9 @@ keeps behaving exactly as before with no other change required).
                     on the signed-out pane and sign-in dialog (#91)
   POLICY_VERSION    version of the privacy policy and terms (default 1.0); people
                     must accept the current one after signing in, so bump it
-                    whenever the legal pages change (#111)
+                    whenever the legal pages change (#111). The API enforces it: until they
+                    accept, a person gets 403 on everything except /api/me,
+                    accept-policy, their own export and account deletion (#130)
   ADMIN_OIDS        comma-separated Entra object ids of the administrators who
                     get the pane's Admin view (users, usage, blocking). Object
                     ids only, never emails - with open signup an email claim
@@ -523,6 +525,49 @@ def require_person(user: auth.CurrentUser = Depends(get_current_user)) -> auth.C
     return user
 
 
+# #130: (DB path, oid) -> the POLICY_VERSION they were last seen to have accepted.
+# Only successes are cached (a person who hasn't accepted is always re-checked), and
+# an entry only counts while it equals the current POLICY_VERSION, so bumping the
+# version needs no invalidation. Cleared when an account is deleted.
+_policy_accepted: dict[tuple[str, str], str] = {}
+
+
+def policy_accepted(user: auth.CurrentUser) -> bool:
+    """True if `user` has accepted the current privacy policy and terms. Always
+    true where there are no accounts to accept for: none/token mode and the
+    review pipeline."""
+    if auth.AUTH_MODE != "entra" or user.is_pipeline:
+        return True
+    key = (DB_PATH, user.oid)
+    if _policy_accepted.get(key) == POLICY_VERSION:
+        return True
+    with db() as con:
+        row = con.execute("SELECT policy_version FROM users WHERE oid=?", (user.oid,)).fetchone()
+    if row and row["policy_version"] == POLICY_VERSION:
+        _policy_accepted[key] = POLICY_VERSION
+        return True
+    return False
+
+
+def require_policy(user: auth.CurrentUser = Depends(get_current_user)) -> auth.CurrentUser:
+    """get_current_user, plus: the caller must have accepted the current privacy
+    policy and terms (#130). The pane's acceptance screen (#111) is only a courtesy;
+    this is what actually enforces it, so another client can't skip it. Taken by every
+    route that reads or writes story data or other people's details. NOT by /api/me,
+    /api/me/accept-policy, /api/me/export or DELETE /api/me: a person has to be able to
+    accept, see their own data and erase it without agreeing to anything first."""
+    if not policy_accepted(user):
+        raise HTTPException(403, {"error": "policy_not_accepted", "policyVersion": POLICY_VERSION})
+    return user
+
+
+def require_person_policy(user: auth.CurrentUser = Depends(require_policy)) -> auth.CurrentUser:
+    """require_person (no review pipeline) with the policy check."""
+    if user.is_pipeline:
+        raise HTTPException(403, "The review pipeline is read-only")
+    return user
+
+
 def is_admin(user: auth.CurrentUser) -> bool:
     # Open mode: an oid is only unique within its own tenant, so an admin must
     # also be signed in from the home tenant (#90).
@@ -530,7 +575,7 @@ def is_admin(user: auth.CurrentUser) -> bool:
             and (auth.SIGNUP_MODE != "open" or auth.is_home_tenant(user.tid)))
 
 
-def require_admin(user: auth.CurrentUser = Depends(require_person)) -> auth.CurrentUser:
+def require_admin(user: auth.CurrentUser = Depends(require_person_policy)) -> auth.CurrentUser:
     """Admin-only routes (#82). 404, not 403, for everyone else so the routes
     aren't advertised. Admins are named by oid in ADMIN_OIDS - see auth.py for
     why never by email."""
@@ -1057,6 +1102,7 @@ def accept_policy(body: AcceptPolicyBody, user: auth.CurrentUser = Depends(requi
     with db(write=True) as con:
         con.execute("UPDATE users SET policy_version=?, policy_accepted_at=? WHERE oid=?",
                     (POLICY_VERSION, time.time(), user.oid))
+    _policy_accepted[(DB_PATH, user.oid)] = POLICY_VERSION
     return _me_out(user)
 
 
@@ -1112,6 +1158,7 @@ def delete_me(body: DeleteAccountBody, user: auth.CurrentUser = Depends(require_
     global _block_epoch
     _block_epoch += 1
     _seen_users.pop((DB_PATH, user.oid), None)
+    _policy_accepted.pop((DB_PATH, user.oid), None)
     logger.info("user %s deleted their account", _sanitize_for_log(user.oid))
     return {"deleted": True, **result}
 
@@ -1141,7 +1188,7 @@ class UserOut(BaseModel):
 
 
 @app.get("/api/users", tags=["auth"], response_model=list[UserOut])
-def list_users(user: auth.CurrentUser = Depends(require_person)):
+def list_users(user: auth.CurrentUser = Depends(require_person_policy)):
     """Your contacts (#11, #88): you, plus the owners and members of every
     series you can access. With open signup (#85) the users table holds
     strangers, so it is no longer listed wholesale; to share with someone
@@ -1166,7 +1213,7 @@ def list_users(user: auth.CurrentUser = Depends(require_person)):
 
 @app.get("/api/users/lookup", tags=["auth"], response_model=UserOut)
 def lookup_user(email: str | None = None, oid: str | None = None,
-                user: auth.CurrentUser = Depends(require_person)):
+                user: auth.CurrentUser = Depends(require_person_policy)):
     """Find one person by exact email (case-insensitive) or exact oid, so a
     series can be shared with someone new without enumerating the directory
     (#88). No partial or wildcard matching: LIKE metacharacters are just
@@ -1284,7 +1331,7 @@ def admin_unblock_user(oid: str, admin: auth.CurrentUser = Depends(require_admin
 
 
 @app.get("/api/series", tags=["series"])
-def list_series(summary: bool = False, user: auth.CurrentUser = Depends(get_current_user)):
+def list_series(summary: bool = False, user: auth.CurrentUser = Depends(require_policy)):
     """`?summary=true` returns just id/name/version/owner - what a series
     picker needs - instead of every series' full settings (a series
     description can be 200,000 characters, and this is called after every
@@ -1303,7 +1350,7 @@ def list_series(summary: bool = False, user: auth.CurrentUser = Depends(get_curr
 
 
 @app.post("/api/series", tags=["series"], dependencies=WRITE_LIMIT)
-def create_series(body: Body, user: auth.CurrentUser = Depends(require_person)):
+def create_series(body: Body, user: auth.CurrentUser = Depends(require_person_policy)):
     sid = new_id()
     data = validate_series(clean(body.data))
     now = time.time()
@@ -1320,7 +1367,7 @@ def create_series(body: Body, user: auth.CurrentUser = Depends(require_person)):
 
 
 @app.put("/api/series/{series_id}", tags=["series"], dependencies=WRITE_LIMIT)
-def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
+def update_series(series_id: str, body: Body, user: auth.CurrentUser = Depends(require_policy)):
     now = time.time()
     data = validate_series(clean(body.data))
     with db(write=True) as con:
@@ -1344,7 +1391,7 @@ class DeletedOut(BaseModel):
 
 
 @app.delete("/api/series/{series_id}", tags=["series"], response_model=DeletedOut, dependencies=WRITE_LIMIT)
-def delete_series(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
+def delete_series(series_id: str, user: auth.CurrentUser = Depends(require_policy)):
     with db() as con:
         require_access(con, user, series_id, "owner")
         con.execute("DELETE FROM series WHERE id=?", (series_id,))
@@ -1397,7 +1444,7 @@ def _etag_matches(header: str | None, etag: str) -> bool:
 
 @app.get("/api/series/{series_id}/bundle", tags=["series"],
          responses={304: {"description": "Unchanged since the ETag in If-None-Match"}})
-def bundle(series_id: str, request: Request, user: auth.CurrentUser = Depends(get_current_user)):
+def bundle(series_id: str, request: Request, user: auth.CurrentUser = Depends(require_policy)):
     """Everything for one series in a single call (also used as the export).
     Sends an ETag; a client that repeats it in If-None-Match gets a bodyless
     304 when nothing in the series has changed (#72)."""
@@ -1411,7 +1458,7 @@ def bundle(series_id: str, request: Request, user: auth.CurrentUser = Depends(ge
 
 
 @app.post("/api/import", tags=["series"], dependencies=WRITE_LIMIT)
-def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(require_person)):
+def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(require_person_policy)):
     """Restore an exported bundle as a NEW series (ids are remapped).
 
     Everything is validated and remapped up front, and only then is the write
@@ -1524,7 +1571,7 @@ class MembersOut(BaseModel):
 
 
 @app.get("/api/series/{series_id}/members", tags=["sharing"], response_model=MembersOut)
-def list_members(series_id: str, user: auth.CurrentUser = Depends(get_current_user)):
+def list_members(series_id: str, user: auth.CurrentUser = Depends(require_policy)):
     with db() as con:
         row = require_access(con, user, series_id, "read")
         rows = con.execute(
@@ -1541,7 +1588,7 @@ class MemberRoleOut(BaseModel):
 
 
 @app.put("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=MemberRoleOut, dependencies=WRITE_LIMIT)
-def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUser = Depends(get_current_user)):
+def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUser = Depends(require_policy)):
     if body.role not in ("editor", "viewer"):
         raise HTTPException(400, "role must be 'editor' or 'viewer'")
     with db() as con:
@@ -1559,7 +1606,7 @@ def put_member(series_id: str, oid: str, body: MemberBody, user: auth.CurrentUse
 
 
 @app.delete("/api/series/{series_id}/members/{oid}", tags=["sharing"], response_model=DeletedOut, dependencies=WRITE_LIMIT)
-def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(get_current_user)):
+def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(require_policy)):
     """The owner can remove anyone; anyone can remove themselves (leave)."""
     if user.is_pipeline:
         raise HTTPException(403, "The review pipeline is read-only")
@@ -1576,7 +1623,7 @@ def delete_member(series_id: str, oid: str, user: auth.CurrentUser = Depends(get
 
 # ---- records (chapters / characters / locations / events / relationships)
 @app.get("/api/series/{series_id}/{kind}", tags=["records"])
-def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(get_current_user)):
+def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(require_policy)):
     check_kind(kind)
     with db() as con:
         require_access(con, user, series_id, "read")
@@ -1587,7 +1634,7 @@ def list_records(series_id: str, kind: str, user: auth.CurrentUser = Depends(get
 
 
 @app.post("/api/series/{series_id}/{kind}", tags=["records"], dependencies=WRITE_LIMIT)
-def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
+def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser = Depends(require_policy)):
     check_kind(kind)
     rid, now = new_id(), time.time()
     data = validate_record(kind, clean(body.data))
@@ -1608,7 +1655,7 @@ def create_record(series_id: str, kind: str, body: Body, user: auth.CurrentUser 
 
 
 @app.put("/api/series/{series_id}/{kind}/{rid}", tags=["records"], dependencies=WRITE_LIMIT)
-def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.CurrentUser = Depends(get_current_user)):
+def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.CurrentUser = Depends(require_policy)):
     check_kind(kind)
     now = time.time()
     data = validate_record(kind, clean(body.data))
@@ -1645,7 +1692,7 @@ def update_record(series_id: str, kind: str, rid: str, body: Body, user: auth.Cu
 
 
 @app.delete("/api/series/{series_id}/{kind}/{rid}", tags=["records"], response_model=DeletedOut, dependencies=WRITE_LIMIT)
-def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = Depends(get_current_user)):
+def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = Depends(require_policy)):
     check_kind(kind)
     with db() as con:
         require_access(con, user, series_id, "write")
@@ -1686,7 +1733,7 @@ def delete_record(series_id: str, kind: str, rid: str, user: auth.CurrentUser = 
 
 # ---- feedback
 @app.post("/api/feedback", status_code=201, tags=["feedback"])
-async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends(require_person)):
+async def submit_feedback(body: dict[str, Any], user: auth.CurrentUser = Depends(require_person_policy)):
     """Files a GitHub issue from the pane's "Log Issue"/"Log Suggestion"
     buttons - see app/github_feedback.py. async because it awaits an
     outbound HTTPS call (httpx.AsyncClient) rather than blocking the
