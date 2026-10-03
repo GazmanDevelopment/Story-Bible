@@ -63,6 +63,31 @@ The app listens on host port **2285** (port 8000 on this NAS is already in
 use by something else - see the #6/#7 issue comments), mapped from the
 container's internal 8000.
 
+### Settings reference
+
+Every setting the app reads is listed in `deploy/compose.yaml` under
+`environment:`, with a comment. The ones you are likely to tune, with their
+meaning and the recommended value (the defaults, unless noted):
+
+| Setting | Meaning | Recommended |
+|---|---|---|
+| `ADMIN_OIDS` | Entra object ids that get the Admin button and are never auto-deleted | Just you |
+| `INACTIVE_DELETE_MONTHS` / `INACTIVE_NOTICE_MONTHS` / `RETENTION_HOUR` | Delete inactive accounts after 24 months, with notice emails at 18, 20 and 23 months; the daily run starts at 4am | Keep the defaults. They match the privacy policy, so change both together. |
+| `BACKUP_DIR` / `BACKUP_KEEP_DAYS` / `BACKUP_HOUR` | Nightly backup location, retention in days, and hour | `/data/backups`, 14, 3. Raise the retention if there's room, and snapshot the dataset too. |
+| `MAX_USERS` | Cap on total accounts, 0 = unlimited | Set a real cap (e.g. 100) if you use `SIGNUP_MODE=open`; 0 is fine for an allowlist. |
+| `MAX_BYTES_PER_OWNER` | Storage per person | 500 MiB |
+| `MAX_SERIES_PER_OWNER` | Series per person | 200 |
+| `MAX_RECORDS_PER_SERIES` | Records per series | 20000 |
+| `WRITE_RATE_LIMIT_PER_MINUTE` | Writes per person per minute | 120 |
+| `LOOKUP_RATE_LIMIT_PER_HOUR` | Email look-ups per person per hour when sharing | 30 |
+| `FEEDBACK_RATE_LIMIT_PER_PERSON` / `FEEDBACK_RATE_LIMIT_GLOBAL` | Log Issue/Suggestion filings per hour, per person and across everyone | 5 / 60 |
+| `MAX_BODY_BYTES` / `IMPORT_MAX_BODY_BYTES` | Request size caps | 5 MiB / 20 MiB. Raise the import cap only if a bible with many research images is rejected. |
+| `ENABLE_API_DOCS` | Serves `/docs`, `/redoc` and `/openapi.json`, which are unauthenticated | `false` in production |
+| `STORYBIBLE_DB` | Database file path | `/data/storybible.db` (leave as is) |
+| `CONTENT_SECURITY_POLICY` | Overrides the built-in CSP header | Leave unset. Add it only if a Word host is blocked from loading something. |
+
+The rate limits only apply in entra mode, and 0 turns a limit off.
+
 ## 5. Point the reverse proxy at it
 
 Already done per #7: the Synology reverse proxy forwards
