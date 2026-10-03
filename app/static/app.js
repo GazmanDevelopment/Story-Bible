@@ -202,7 +202,7 @@ async function initAuth() {
   try {
     S.config = await (await fetch("/api/config")).json();
   } catch {
-    S.config = { authMode: "none", tenantId: "", clientId: "", authority: "", privacyUrl: "", termsUrl: "", policyVersion: "" };  // server unreachable - boot()'s own error state takes it from here
+    S.config = { authMode: "none", tenantId: "", clientId: "", authority: "", privacyUrl: "", termsUrl: "", policyVersion: "", buildVersion: "", buildDate: "" };  // server unreachable - boot()'s own error state takes it from here
   }
   if (S.config.authMode !== "entra") return;
   const msalConfig = {
@@ -897,6 +897,7 @@ function seriesForm() {
   <h3>Feedback</h3>
   <div class="toolbar"><button type="button" data-act="log-issue">Log Issue</button>
     <button type="button" data-act="log-suggestion">Log Suggestion</button></div>
+  ${buildInfoHtml()}
   ${S.config?.authMode === "token" ? `
   <h3>Connection</h3>
   <label><span>API token (only if the server sets STORYBIBLE_TOKEN)</span>
@@ -944,6 +945,16 @@ async function loadAdminUsers() {
   if (S.view?.kind === "admin") render();
 }
 
+// The build stamp (#144), e.g. "Build v0.1.0-12-gabc1234 · 2026-10-03"; "" if the
+// server didn't report one.
+function buildInfoText() {
+  const v = S.config?.buildVersion;
+  return v ? `Build ${v}${S.config.buildDate ? ` · ${S.config.buildDate}` : ""}` : "";
+}
+function buildInfoHtml() {
+  const t = buildInfoText();
+  return t ? `<div class="hint" data-role="build-info">${esc(t)}</div>` : "";
+}
 function feedbackForm(kind) {
   const label = kind === "issue" ? "Log an issue" : "Log a suggestion";
   return `<form data-kind="feedback" data-feedback-kind="${kind}">
@@ -953,7 +964,9 @@ function feedbackForm(kind) {
     ${field("description", "Description", "", "textarea", 'rows="6" maxlength="4000" placeholder="What happened, or what you\'d like to see"', true)}
     <div class="hint" data-role="public-notice"><b>This is posted as a public GitHub issue</b>, so anyone can read it.
       Don't include story text, character or place names from your series, or anything private.${
-        S.config?.authMode === "entra" ? " Your display name is added to it." : ""}</div>
+        S.config?.authMode === "entra" ? " Your display name is added to it." : ""}${
+        buildInfoText() ? " The build version and date are added too." : ""}</div>
+    ${buildInfoHtml()}
     <div class="formbar"><div></div>
       <div><button type="button" data-act="cancel">Cancel</button>
       <button class="primary" data-act="save-feedback">${label}</button></div></div>

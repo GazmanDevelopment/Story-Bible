@@ -13,7 +13,7 @@ pointed at the old URL now gets a 404, which is your cue to update it.)
 `https://storybible.huscroft.com.au/api/health` returns, for example:
 
 ```json
-{"ok":true,"auth":true,"version":"0.1.0","backup_ok":true}
+{"ok":true,"auth":true,"version":"0.1.0","build":"v0.1.0-12-gabc1234","buildDate":"2026-10-03","backup_ok":true}
 ```
 
 | Check | How | Healthy | Unhealthy |

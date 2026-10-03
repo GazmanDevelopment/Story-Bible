@@ -40,7 +40,7 @@ import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError, field_validator
 
-from . import __version__, auth
+from . import __version__, auth, build_label
 from .models import LooseStr
 
 REPO = "GazmanDevelopment/Story-Bible"
@@ -218,7 +218,7 @@ def _submitter_line(name: str) -> str:
 def _issue_body(feedback: FeedbackIn) -> str:
     submitted_at = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
     # Display name only, never email/oid: the repo is public (#73). No client IP either.
-    return (f"{feedback.description}\n\n---\nFiled from the Story Bible task pane · v{__version__} · {submitted_at}"
+    return (f"{feedback.description}\n\n---\nFiled from the Story Bible task pane · v{__version__} · build {build_label()} · {submitted_at}"
             f"{_submitter_line(feedback.submitted_by)}")
 
 

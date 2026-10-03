@@ -40,6 +40,12 @@ RUN python -m compileall -q /app/app && chmod -R a+rX /app
 RUN mkdir -p /data && chown storybible:storybible /data
 VOLUME ["/data"]
 
+# Build stamp shown in the pane, the help guide and filed issues (#144). Passed
+# by deploy/update.sh and CI (--build-arg); a bare `docker build` reports "dev".
+ARG BUILD_VERSION=dev
+ARG BUILD_DATE=
+ENV BUILD_VERSION=$BUILD_VERSION BUILD_DATE=$BUILD_DATE
+
 USER storybible:storybible
 EXPOSE 8000
 

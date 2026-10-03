@@ -53,7 +53,9 @@ def main() -> None:
     os.close(fd)
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
-    env = {**os.environ, "STORYBIBLE_DB": db, "AUTH_MODE": "none"}
+    # A fixed build stamp (#144) so regenerating the screenshots never changes them just because the date did.
+    env = {**os.environ, "STORYBIBLE_DB": db, "AUTH_MODE": "none",
+           "BUILD_VERSION": "v0.1.0", "BUILD_DATE": "2026-01-01"}
     for var in ("STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS"):
         env.pop(var, None)
     log = tempfile.TemporaryFile()
