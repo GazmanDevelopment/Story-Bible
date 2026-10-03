@@ -8,6 +8,7 @@ Word task-pane add-in plus a small FastAPI server for keeping a story bible (cha
 - **PLAN.md** section 3 also has the open-signup setup: the Entra app registration changes and the go-live checklist for `SIGNUP_MODE=open` (any Microsoft account, #85)
 - **[deploy/README.md](deploy/README.md)**: deploying to TrueNAS (#6) - dataset, build, Custom App, reverse proxy
 - **[docs/FEEDBACK.md](docs/FEEDBACK.md)**: how the pane's "Log Issue"/"Log Suggestion" buttons work (#22)
+- **[docs/PROCESSING.md](docs/PROCESSING.md)** / **[docs/BREACH.md](docs/BREACH.md)**: the record of what personal data is held and why (with log retention and the ICO fee decision), and the data-breach checklist (#114)
 - **[docs/privacy.html](docs/privacy.html)** / **[docs/terms.html](docs/terms.html)**: the privacy policy and terms of use, published alongside the help guide
 - `app/`: FastAPI backend (`main.py`) and task pane (`static/`)
 - `manifest.dev.xml` / `manifest.prod.xml`: Word add-in manifests, generated from `manifest.template.xml` by `scripts/generate_manifest.py` (#8) - edit the template, not the generated files
