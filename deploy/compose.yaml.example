@@ -59,6 +59,10 @@ services:
       # and LEGACY_OWNER_OID is who owns pre-sign-in series - see .env.example.
       ALLOWED_OIDS: ""
       LEGACY_OWNER_OID: ""
+      # Comma-separated Entra object ids (never emails) of the administrators: they
+      # get the Admin button (registered users, usage, block/unblock) and are never
+      # auto-deleted for inactivity. Recommended: just you. Blank = no admin.
+      ADMIN_OIDS: ""
       # "allowlist" (default) or "open" (any Microsoft account) - see .env.example
       # before changing it. BLOCKED_TENANTS: tenant ids refused in open mode.
       SIGNUP_MODE: "allowlist"
@@ -85,13 +89,44 @@ services:
       SMTP_USER: ""
       SMTP_PASSWORD: ""
       SMTP_FROM: ""
-      # Open signup limits (#89) - see .env.example for what each does:
-      #   MAX_USERS (0 = unlimited), MAX_BYTES_PER_OWNER, MAX_SERIES_PER_OWNER,
-      #   MAX_RECORDS_PER_SERIES, WRITE_RATE_LIMIT_PER_MINUTE,
-      #   LOOKUP_RATE_LIMIT_PER_HOUR, FEEDBACK_RATE_LIMIT_PER_PERSON, FEEDBACK_RATE_LIMIT_GLOBAL
-      # Everything else (BACKUP_DIR, BACKUP_KEEP_DAYS, BACKUP_HOUR,
-      # MAX_BODY_BYTES, IMPORT_MAX_BODY_BYTES, STORYBIBLE_DB) has a sane
-      # default - add here only to override.
+      # Inactive-account retention (#113, entra mode only). Accounts nobody has
+      # signed in to for INACTIVE_DELETE_MONTHS are deleted (0 = never), after a
+      # notice email at each month in INACTIVE_NOTICE_MONTHS. These are the values
+      # the privacy policy states - change both together. RETENTION_HOUR is the
+      # local hour (per TZ) the daily run starts, after the backup.
+      INACTIVE_DELETE_MONTHS: "24"
+      INACTIVE_NOTICE_MONTHS: "18,20,23"
+      RETENTION_HOUR: "4"
+      # Backups (#5). The nightly copy goes under BACKUP_DIR (inside the /data
+      # volume, so it survives restarts), at BACKUP_HOUR local time, and copies
+      # older than BACKUP_KEEP_DAYS are pruned. Recommended: keep the defaults;
+      # raise KEEP_DAYS if the dataset has room. Also snapshot the dataset itself.
+      BACKUP_DIR: "/data/backups"
+      BACKUP_KEEP_DAYS: "14"
+      BACKUP_HOUR: "3"
+      # Abuse limits (#71/#89). Set per person unless noted. Defaults suit a small
+      # private group; tighten MAX_USERS / MAX_BYTES_PER_OWNER first if you open
+      # signup (SIGNUP_MODE=open). Rate limits apply in entra mode only. 0 = off.
+      MAX_USERS: "0"                       # total accounts; 0 = unlimited. Recommended for open signup: a cap you can afford, e.g. 100
+      MAX_BYTES_PER_OWNER: "524288000"     # 500 MiB of JSON across all series one person owns
+      MAX_SERIES_PER_OWNER: "200"
+      MAX_RECORDS_PER_SERIES: "20000"
+      WRITE_RATE_LIMIT_PER_MINUTE: "120"   # write requests; over it gets 429
+      LOOKUP_RATE_LIMIT_PER_HOUR: "30"     # people look-ups by email when sharing
+      FEEDBACK_RATE_LIMIT_PER_PERSON: "5"  # Log Issue/Suggestion filings per hour
+      FEEDBACK_RATE_LIMIT_GLOBAL: "60"     # ...across everyone; keep well above the per-person cap
+      # Request size caps in bytes. Keep the defaults; raise IMPORT_MAX_BODY_BYTES
+      # only if a whole-bible import with many research images is rejected.
+      MAX_BODY_BYTES: "5242880"            # 5 MiB
+      IMPORT_MAX_BODY_BYTES: "20971520"    # 20 MiB, /api/import only
+      # Leave off in production: /docs, /redoc and /openapi.json are unauthenticated (#68).
+      ENABLE_API_DOCS: "false"
+      # Database file (#5). No reason to change it in this container.
+      STORYBIBLE_DB: "/data/storybible.db"
+      # Content-Security-Policy header (#69). Not set here on purpose: blank/unset
+      # uses the built-in policy, which is the recommended setting. Only add
+      # CONTENT_SECURITY_POLICY if a Word host is blocked from loading something
+      # ("off" removes just that header - not recommended).
     mem_limit: 512m
     # Hardening (#74). The app only ever writes to /data (the volume above) and
     # temp files; it needs no privileges and no extra capabilities. The CI
