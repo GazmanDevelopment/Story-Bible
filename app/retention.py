@@ -122,6 +122,7 @@ def _process_one(u: dict[str, Any], now: float, notices: list[int], delete_age: 
             app_main.delete_account_data(con, oid)
         app_main._block_epoch += 1
         app_main._seen_users.pop((app_main.DB_PATH, oid), None)
+        app_main._policy_accepted.pop((app_main.DB_PATH, oid), None)
         app_main.logger.info("retention: deleted inactive account %s", app_main._sanitize_for_log(oid))
         return "deleted"
     if age < first_age:
