@@ -75,9 +75,11 @@ my people", so the server enforces the following itself:
 - `BLOCKED_TENANTS` refuses whole tenants; administrators can block a single
   person (a block survives account deletion).
 - Limits: `MAX_USERS`, `MAX_BYTES_PER_OWNER`, `MAX_SERIES_PER_OWNER`,
-  `MAX_RECORDS_PER_SERIES`, `WRITE_RATE_LIMIT_PER_MINUTE` and the feedback
-  rate limits. All are listed in `.env.example`.
+  `MAX_RECORDS_PER_SERIES`, `WRITE_RATE_LIMIT_PER_MINUTE`, `LOOKUP_RATE_LIMIT_PER_HOUR`
+  and the feedback rate limits. All are listed in `.env.example`.
 - `GET /api/users` only returns people you already share a series with.
+  Finding someone new (`/api/users/lookup`) needs their exact email, is
+  rate limited per person, and returns only their id and display name.
 - Identity is the `oid` (with `tid`); name and email claims are display-only
   because the person's own tenant controls them.
 - Reverse-proxy and container logs contain IP addresses (personal data); the

@@ -414,7 +414,7 @@ def test_lookup_by_exact_oid():
     target = "lookup-by-oid"
     c.get("/api/me", headers=_as(target))
     r = c.get("/api/users/lookup", params={"oid": target}, headers=_as("lookup-caller"))
-    assert r.status_code == 200 and r.json()["email"] == f"{target}@example.com"
+    assert r.status_code == 200 and r.json()["oid"] == target
 
 
 @pytest.mark.parametrize("probe", ["lookup-par", "%", "_", "%@example.com", "lookup-par%", "lookup-par*", "@example.com"])
@@ -450,7 +450,7 @@ def test_lookup_duplicate_email_is_409_and_oid_still_works():
         c.get("/api/me", headers=_as(oid, preferred_username=shared))
     h = _as("lookup-caller")
     assert c.get("/api/users/lookup", params={"email": shared}, headers=h).status_code == 409
-    assert c.get("/api/users/lookup", params={"oid": "dupe-guest"}, headers=h).json()["email"] == shared
+    assert c.get("/api/users/lookup", params={"oid": "dupe-guest"}, headers=h).json()["oid"] == "dupe-guest"
 
 
 def test_lookup_unknown_email_is_404():
@@ -490,3 +490,38 @@ def test_two_real_people_editing_the_same_record_the_second_gets_409(series):
     detail = r.json()["detail"]
     assert detail["current"]["name"] == "Owner's edit"
     assert detail["updated_by"] == OWNER_OID  # the fake token's `name` claim, a real display name
+
+
+# ----------------------------------------------------- lookup limits (#131)
+def test_lookup_response_has_no_email():
+    c.get("/api/me", headers=_as("lookup-noemail-target"))
+    r = c.get("/api/users/lookup", params={"email": "lookup-noemail-target@example.com"}, headers=_as("lookup-caller"))
+    assert r.status_code == 200
+    assert set(r.json()) == {"oid", "display_name"}
+
+
+def test_lookup_is_rate_limited_per_person(monkeypatch):
+    monkeypatch.setattr(main, "_lookup_limiter", main.feedback_mod._RateLimiter(3, 3600))
+    c.get("/api/me", headers=_as("lookup-limit-target"))
+    guess = {"email": "lookup-limit-target@example.com"}
+    for _ in range(3):  # hits and misses both count
+        assert c.get("/api/users/lookup", params={"email": "nobody@example.com"}, headers=_as("lookup-greedy")).status_code == 404
+    r = c.get("/api/users/lookup", params=guess, headers=_as("lookup-greedy"))
+    assert r.status_code == 429 and r.headers["Retry-After"] == "3600"
+    # someone else has their own allowance
+    assert c.get("/api/users/lookup", params=guess, headers=_as("lookup-polite")).status_code == 200
+
+
+def test_malformed_lookups_do_not_use_up_the_allowance(monkeypatch):
+    monkeypatch.setattr(main, "_lookup_limiter", main.feedback_mod._RateLimiter(1, 3600))
+    h = _as("lookup-typo")
+    for _ in range(5):
+        assert c.get("/api/users/lookup", headers=h).status_code == 400
+    assert c.get("/api/users/lookup", params={"email": "x@example.com"}, headers=h).status_code == 404
+
+
+def test_lookup_limit_does_not_apply_outside_entra_mode(monkeypatch):
+    monkeypatch.setattr(main, "_lookup_limiter", main.feedback_mod._RateLimiter(1, 3600))
+    monkeypatch.setattr(auth, "AUTH_MODE", "none")
+    for _ in range(3):
+        assert c.get("/api/users/lookup", params={"email": "x@example.com"}).status_code == 404

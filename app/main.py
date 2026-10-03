@@ -23,6 +23,10 @@ Env vars:
   WRITE_RATE_LIMIT_PER_MINUTE  per-person ceiling on write requests (POST/PUT/
                     DELETE) in AUTH_MODE=entra (default 120, 0 = off); over it
                     gets 429 + Retry-After (#89)
+  LOOKUP_RATE_LIMIT_PER_HOUR  per-person ceiling on /api/users/lookup in
+                    AUTH_MODE=entra (default 30, 0 = off); over it gets 429 +
+                    Retry-After. Stops one account testing lists of addresses
+                    to learn who has signed up (#131)
   FEEDBACK_RATE_LIMIT_PER_PERSON / FEEDBACK_RATE_LIMIT_GLOBAL  "Log Issue"
                     filings per hour, per person / across everyone (defaults
                     5 / 60; see app/github_feedback.py, #89)
@@ -140,6 +144,11 @@ WRITE_RATE_LIMIT_PER_MINUTE = int(os.environ.get("WRITE_RATE_LIMIT_PER_MINUTE", 
 # right for the single worker. None = disabled.
 _write_limiter = (feedback_mod._RateLimiter(WRITE_RATE_LIMIT_PER_MINUTE, 60)
                   if WRITE_RATE_LIMIT_PER_MINUTE > 0 else None)
+# Lookups of "does this email have an account" (#131), per person per hour. Same
+# limiter, same per-process caveat. None = disabled.
+LOOKUP_RATE_LIMIT_PER_HOUR = int(os.environ.get("LOOKUP_RATE_LIMIT_PER_HOUR", 30))
+_lookup_limiter = (feedback_mod._RateLimiter(LOOKUP_RATE_LIMIT_PER_HOUR, 3600)
+                   if LOOKUP_RATE_LIMIT_PER_HOUR > 0 else None)
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Record kinds that hang off a series
@@ -1211,16 +1220,31 @@ def list_users(user: auth.CurrentUser = Depends(require_person_policy)):
     return [dict(r) for r in rows]
 
 
-@app.get("/api/users/lookup", tags=["auth"], response_model=UserOut)
+class LookupOut(BaseModel):
+    """Deliberately no email: the caller supplied it (or already has the oid), so
+    echoing it back adds nothing but a way to read an address off an oid (#131)."""
+    oid: str
+    display_name: str
+
+
+@app.get("/api/users/lookup", tags=["auth"], response_model=LookupOut,
+         responses={429: {"description": "Too many lookups in the last hour"}})
 def lookup_user(email: str | None = None, oid: str | None = None,
                 user: auth.CurrentUser = Depends(require_person_policy)):
     """Find one person by exact email (case-insensitive) or exact oid, so a
     series can be shared with someone new without enumerating the directory
     (#88). No partial or wildcard matching: LIKE metacharacters are just
-    literal characters here. 404 if nobody matches."""
+    literal characters here. 404 if nobody matches. Rate limited per person
+    (LOOKUP_RATE_LIMIT_PER_HOUR, #131): a 404 vs 200 tells the caller whether an
+    address has an account, so unlimited guessing would be a membership oracle."""
     email = (email or "").strip()
     if bool(email) == bool(oid):
         raise HTTPException(400, "Give exactly one of email or oid")
+    # After the argument check (a malformed request reveals nothing, so it needn't
+    # use up an allowance); only in entra mode, where there are real accounts.
+    if _lookup_limiter is not None and auth.AUTH_MODE == "entra":
+        if _lookup_limiter.reserve(user.oid) is None:
+            raise HTTPException(429, "Too many lookups - try again later", headers={"Retry-After": "3600"})
     with db() as con:
         if email:
             rows = con.execute(
@@ -1232,7 +1256,7 @@ def lookup_user(email: str | None = None, oid: str | None = None,
         raise HTTPException(409, "More than one account has that email - share using their oid instead")
     if not rows:
         raise HTTPException(404, "No matching user - they need to have signed in at least once")
-    return dict(rows[0])
+    return {"oid": rows[0]["oid"], "display_name": rows[0]["display_name"]}
 
 
 # ---- series

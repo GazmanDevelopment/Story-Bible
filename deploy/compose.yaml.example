@@ -88,7 +88,7 @@ services:
       # Open signup limits (#89) - see .env.example for what each does:
       #   MAX_USERS (0 = unlimited), MAX_BYTES_PER_OWNER, MAX_SERIES_PER_OWNER,
       #   MAX_RECORDS_PER_SERIES, WRITE_RATE_LIMIT_PER_MINUTE,
-      #   FEEDBACK_RATE_LIMIT_PER_PERSON, FEEDBACK_RATE_LIMIT_GLOBAL
+      #   LOOKUP_RATE_LIMIT_PER_HOUR, FEEDBACK_RATE_LIMIT_PER_PERSON, FEEDBACK_RATE_LIMIT_GLOBAL
       # Everything else (BACKUP_DIR, BACKUP_KEEP_DAYS, BACKUP_HOUR,
       # MAX_BODY_BYTES, IMPORT_MAX_BODY_BYTES, STORYBIBLE_DB) has a sane
       # default - add here only to override.
