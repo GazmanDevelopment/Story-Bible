@@ -327,6 +327,32 @@ def test_import_remaps_references_and_scrubs_broken_ones():
     assert len(got["relationships"]) == 1  # the one with a missing end was skipped
 
 
+def test_import_only_remaps_reference_fields_not_text_that_equals_an_old_id():
+    # #126: short ids ("1", "c1") are common in hand-edited / generated bundles,
+    # and ordinary text that happened to match one used to be rewritten.
+    bundle = {
+        "series": {"name": "Short ids"},
+        "chapters": [{"id": "1", "number": 1, "title": "1"}],
+        "characters": [{"id": "c1", "name": "c1", "age": "1", "notes": "c1", "custom": {"Build": "c1"}}],
+        "locations": [{"id": "l1", "name": "l1", "character_ids": ["c1"]}],
+        "events": [{"id": "e1", "title": "e1", "chapter_id": "1", "location_id": "l1", "character_ids": ["c1"]}],
+        "research": [{"id": "r1", "title": "c1", "body": "<p>c1</p>", "event_ids": ["e1"]}],
+    }
+    r = c.post("/api/import", json=bundle)
+    assert r.status_code == 200, r.text
+    assert r.json()["dropped_references"] == 0
+    got = c.get(f"/api/series/{r.json()['id']}/bundle").json()
+    ch, char, loc, ev, res = (got[k][0] for k in ("chapters", "characters", "locations", "events", "research"))
+    assert ch["title"] == "1"
+    assert (char["name"], char["age"], char["notes"], char["custom"]) == ("c1", "1", "c1", {"Build": "c1"})
+    assert loc["name"] == "l1" and ev["title"] == "e1"
+    assert (res["title"], res["body"]) == ("c1", "<p>c1</p>")
+    # ...while the references themselves still point at the new ids
+    assert loc["character_ids"] == [char["id"]]
+    assert (ev["chapter_id"], ev["location_id"], ev["character_ids"]) == (ch["id"], loc["id"], [char["id"]])
+    assert res["event_ids"] == [ev["id"]]
+
+
 def test_a_clean_import_reports_no_dropped_references():
     r = c.post("/api/import", json={"series": {"name": "Clean"}, "characters": [{"id": "a", "name": "x"}]})
     assert r.json()["dropped_references"] == 0

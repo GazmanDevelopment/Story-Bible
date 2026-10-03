@@ -1456,20 +1456,25 @@ def import_bundle(bundle_in: dict[str, Any], user: auth.CurrentUser = Depends(re
             idmap[rec["id"]] = new_id()
     valid = {k: {idmap[rec["id"]] for rec in bundle_in.get(k, [])} for k in KINDS}
 
-    def remap(v):
-        if isinstance(v, str):
-            return idmap.get(v, v)
-        if isinstance(v, list):
-            return [remap(x) for x in v]
-        if isinstance(v, dict):
-            return {kk: remap(vv) for kk, vv in v.items()}
-        return v
+    def remap_refs(k: str, raw: dict) -> dict:
+        """Old id -> new id, in the reference fields only (models.REF_FIELDS).
+        Every other field is left alone: a bundle with short ids ("1", "c1")
+        must not have an age, a note or a title that happens to equal one
+        rewritten to a random id (#126). Unhashable junk in a hand-edited
+        list is passed through for scrub_refs to drop."""
+        for field in REF_FIELDS.get(k, {}):
+            v = raw.get(field)
+            if isinstance(v, str):
+                raw[field] = idmap.get(v, v)
+            elif isinstance(v, list):
+                raw[field] = [idmap.get(x, x) if isinstance(x, str) else x for x in v]
+        return raw
 
     prepared: list[tuple[str, str, dict]] = []
     dropped = 0
     for k in KINDS:
         for rec in bundle_in.get(k, []):
-            raw = remap(clean(rec))
+            raw = remap_refs(k, clean(rec))
             # Scrub before validating: a dangling reference from old data can
             # be an arbitrary (even over-long) foreign id, which would
             # otherwise fail validation instead of simply being dropped.
