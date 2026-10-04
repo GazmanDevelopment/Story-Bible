@@ -80,7 +80,9 @@ label > span { display: block; font-size: 12px; color: var(--muted); margin-bott
 
 .rel { display: flex; justify-content: space-between; align-items: center; gap: 6px;
   padding: 5px 0; border-bottom: 1px dashed var(--line); }
-.rel .note { color: var(--muted); font-size: 12px; }
+/* Not scoped to .rel - a generic muted small-text note, also used in
+   #148's sharing rows (an .addrow, not a .rel). */
+.note { color: var(--muted); font-size: 12px; }
 .addrow { display: grid; grid-template-columns: 1fr 1fr auto; gap: 4px; margin-top: 6px; }
 
 .tl { border-left: 2px solid var(--line); margin-left: 6px; padding-left: 12px; }
