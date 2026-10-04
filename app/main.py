@@ -1601,6 +1601,11 @@ class MemberOut(BaseModel):
 
 class MembersOut(BaseModel):
     owner_oid: str
+    # #148: so a member can see who shared the series with them - scoped to
+    # people who already have access to this specific series (require_access
+    # below), never a general directory (that's /api/users/lookup's job, #88).
+    owner_display_name: str
+    owner_email: str
     members: list[MemberOut]
 
 
@@ -1613,7 +1618,25 @@ def list_members(series_id: str, user: auth.CurrentUser = Depends(require_policy
             "FROM members LEFT JOIN users ON users.oid = members.oid WHERE series_id=?",
             (series_id,),
         ).fetchall()
-    return {"owner_oid": row["owner_oid"], "members": [dict(r) for r in rows]}
+        owner_row = con.execute(
+            "SELECT display_name, email FROM users WHERE oid=?", (row["owner_oid"],)
+        ).fetchone()
+        # Same fallback as display_name_for() (a none/token-mode synthetic
+        # owner, or one whose account was since deleted, never has a `users`
+        # row) - inlined so this doesn't run a second, otherwise-identical
+        # query just to get the name too.
+        if owner_row:
+            owner_display_name = owner_row["display_name"]
+            owner_email = owner_row["email"]
+        else:
+            owner_display_name = _SYNTHETIC_DISPLAY_NAMES.get(row["owner_oid"], row["owner_oid"])
+            owner_email = ""
+    return {
+        "owner_oid": row["owner_oid"],
+        "owner_display_name": owner_display_name,
+        "owner_email": owner_email,
+        "members": [dict(r) for r in rows],
+    }
 
 
 class MemberRoleOut(BaseModel):

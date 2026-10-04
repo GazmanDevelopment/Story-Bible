@@ -188,6 +188,16 @@ def test_list_members_visible_to_any_member(series):
     assert oids == {EDITOR_OID, VIEWER_OID}
 
 
+def test_list_members_includes_the_owners_name_and_email(series):
+    """#148: so a member can see who shared the series with them - via the
+    series' own member list (scoped to people already on it), not a lookup
+    of the general directory."""
+    r = c.get(f"/api/series/{series['id']}/members", headers=_as(VIEWER_OID))
+    body = r.json()
+    assert body["owner_display_name"] == OWNER_OID  # _token()'s synthetic "name" claim
+    assert body["owner_email"] == f"{OWNER_OID}@example.com"
+
+
 def test_owner_can_remove_a_member(series):
     r = c.delete(f"/api/series/{series['id']}/members/{VIEWER_OID}", headers=_as(OWNER_OID))
     assert r.status_code == 200

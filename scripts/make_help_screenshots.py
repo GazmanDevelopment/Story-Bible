@@ -179,6 +179,20 @@ def shoot(base: str, img_path: Path) -> None:
               renderHeader();
             }""")
             snap(pg, "signed-in")
+
+            # Sharing panel (#148), also faked client-side: entra mode plus
+            # a plausible member list, nothing sent to the server. 'local'
+            # matches the demo series' real none-mode owner oid, so the
+            # owner's (not a member's) view of the panel renders.
+            pg.evaluate("""async () => {
+              S.me = {...S.me, oid: 'local'};
+              S.members = {owner_oid: 'local', owner_display_name: 'Alex Morgan', owner_email: 'alex.morgan@example.com',
+                members: [{oid: 'friend-oid', role: 'viewer', display_name: 'Jamie Patel', email: 'jamie.patel@example.com'}]};
+              S.tab = 'series'; S.view = null; render();
+            }""")
+            pg.wait_for_selector("text=Sharing")
+            snap(pg, "sharing")
+
             pg.click("[data-act=open-account]")
             pg.wait_for_selector("#deleteConfirm")
             snap(pg, "account")

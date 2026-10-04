@@ -1121,3 +1121,104 @@ def test_policy_gate_is_skipped_when_already_current(server, browser_page):
     pg.wait_for_function("() => window.seriesLoaded === true")
     assert pg.locator("[data-act=accept-policy]").count() == 0
     assert not errors, errors
+
+
+def test_sharing_panel_hidden_outside_entra_mode(server, browser_page):
+    """#148: sharing only has real per-user identity in entra mode."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    assert "Sharing" not in pg.inner_text("#main")
+    assert not errors, errors
+
+
+def test_owner_can_share_change_role_and_remove(server, browser_page):
+    """#148: drives the real click/change handlers with api() stubbed, the
+    same way the admin view's tests do."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    pg.evaluate("""async () => {
+        window.calls = [];
+        const members = [];
+        window.api = async (path, method = "GET", body) => {
+            window.calls.push([method, path, body]);
+            const base = `/series/${S.sid}/members`;
+            if (path === base) return { owner_oid: "owner-oid", owner_display_name: "Me", owner_email: "me@x.com", members };
+            if (path === "/users/lookup?email=" + encodeURIComponent("jamie.patel@example.com"))
+                return { oid: "friend-oid", display_name: "Jamie Patel" };
+            if (method === "PUT" && path === `${base}/friend-oid`) {
+                const existing = members.find((m) => m.oid === "friend-oid");
+                if (existing) existing.role = body.role;
+                else members.push({ oid: "friend-oid", role: body.role, display_name: "Jamie Patel", email: "jamie.patel@example.com" });
+                return {};
+            }
+            if (method === "DELETE" && path === `${base}/friend-oid`) { members.length = 0; return {}; }
+            return [];
+        };
+        S.config = { ...S.config, authMode: "entra" };
+        msalAccount = { name: "Me" };
+        S.me = { oid: "owner-oid", email: "me@x.com", isAdmin: false };
+        S.b.series.owner_oid = "owner-oid";
+        await loadMembers();
+        render();
+    }""")
+    pg.wait_for_selector("text=Sharing")
+    assert "Not shared with anyone yet" in pg.inner_text("#main")
+
+    pg.fill("#shareEmail", "jamie.patel@example.com")
+    pg.click("[data-act=share-add]")
+    pg.wait_for_selector("text=Jamie Patel")
+    calls = pg.evaluate("window.calls")
+    assert ["GET", "/users/lookup?email=" + "jamie.patel%40example.com", None] in calls
+    assert any(c[0] == "PUT" and c[2] == {"role": "viewer"} for c in calls)
+
+    pg.select_option("[data-act=share-role]", "editor")
+    pg.wait_for_function("window.calls.some(c => c[0] === 'PUT' && JSON.stringify(c[2]) === '{\"role\":\"editor\"}')")
+    pg.wait_for_function("document.querySelector('[data-act=share-role]').value === 'editor'")
+
+    pg.click("[data-act=share-remove]")
+    pg.wait_for_selector("text=Not shared with anyone yet")
+    calls = pg.evaluate("window.calls")
+    assert ["DELETE", f"/series/{pg.evaluate('S.sid')}/members/friend-oid", None] in calls
+    assert not errors, errors
+
+
+def test_a_shared_member_sees_who_shared_it_and_can_leave(server, browser_page):
+    """#148"""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    pg.click("#tabs >> text=Series")
+    pg.wait_for_selector("form[data-kind=series]")
+    pg.evaluate("""async () => {
+        window.calls = [];
+        window.api = async (path, method = "GET", body) => {
+            window.calls.push([method, path, body]);
+            if (path === `/series/${S.sid}/members`)
+                return { owner_oid: "owner-oid", owner_display_name: "Alex Morgan", owner_email: "alex@x.com",
+                         members: [{ oid: "me", role: "viewer", display_name: "Me", email: "me@x.com" }] };
+            if (path === "/series?summary=true") return [];
+            if (method === "DELETE" && path === `/series/${S.sid}/members/me`) { window.left = true; return {}; }
+            return [];
+        };
+        S.config = { ...S.config, authMode: "entra" };
+        msalAccount = { name: "Me" };
+        S.me = { oid: "me", email: "me@x.com", isAdmin: false };
+        S.b.series.owner_oid = "owner-oid";
+        await loadMembers();
+        render();
+    }""")
+    pg.wait_for_selector("text=Sharing")
+    text = pg.inner_text("#main")
+    assert "Alex Morgan" in text and "alex@x.com" in text and "you can view" in text
+    assert pg.locator("[data-act=share-add]").count() == 0   # not the owner - no add-by-email row
+
+    pg.click("[data-act=share-leave]")
+    pg.wait_for_function("window.left === true")
+    assert "Create a series to get started" in pg.inner_text("#main")  # left -> no series selected
+    assert not errors, errors
