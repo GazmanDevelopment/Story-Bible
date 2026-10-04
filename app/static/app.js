@@ -19,6 +19,7 @@ const S = {
   adminUsers: null,   // admin view's user list
   config: null,       // {authMode, tenantId, clientId, authority, privacyUrl, termsUrl} from GET /api/config (#13, #91)
   formSnapshot: null, // JSON of the open form's fields right after rendering - unsaved-changes guard (#58)
+  members: null,      // {owner_oid, owner_display_name, owner_email, members: [...]} for the open series (#148)
 };
 
 // MSAL state (#13) - not on S since it holds live library objects, not
@@ -202,7 +203,7 @@ async function initAuth() {
   try {
     S.config = await (await fetch("/api/config")).json();
   } catch {
-    S.config = { authMode: "none", tenantId: "", clientId: "", authority: "", privacyUrl: "", termsUrl: "", policyVersion: "" };  // server unreachable - boot()'s own error state takes it from here
+    S.config = { authMode: "none", tenantId: "", clientId: "", authority: "", privacyUrl: "", termsUrl: "", policyVersion: "", buildVersion: "", buildDate: "" };  // server unreachable - boot()'s own error state takes it from here
   }
   if (S.config.authMode !== "entra") return;
   const msalConfig = {
@@ -367,10 +368,16 @@ async function revalidateBundle() {
     render();
   } catch { /* a background refresh: stay quiet, the next real action will surface any error */ }
 }
+async function loadMembers() {
+  // #148: sharing only has real per-user identity in entra mode - none/
+  // token modes keep today's single-shared-bible behaviour, so there's
+  // nothing meaningful to show.
+  S.members = S.sid && S.config?.authMode === "entra" ? await api(`/series/${S.sid}/members`) : null;
+}
 async function selectSeries(id) {
   if ((id || null) !== S.sid) { S.tlChars = []; S.tlLocs = []; }  // pills belong to one series
   S.sid = id || null; S.view = null; lsSet("sb_series", S.sid || "");
-  await loadBundle(); render();
+  await Promise.all([loadBundle(), loadMembers()]); render();  // independent requests (#148)
 }
 
 // ------------------------------------------------------------------ renderers
@@ -863,6 +870,44 @@ function quillUploadHandler(range, files) {
   insertCompressedImages(this.quill, range.index, files);
 }
 
+// #148: sharing - add by exact email only (never a lookup/browse of other
+// users - the email picker goes through GET /users/lookup, #88's rate-
+// limited, no-enumeration primitive, same flow tests/test_ownership.py's
+// test_lookup_then_share_with_a_stranger already exercises server-side).
+// Choose edit or view, revoke any time from either side. Outside the
+// settings <form>, like Chapters/Backup/Feedback below - each action here
+// is immediate, not batched into one Save.
+function sharingSection() {
+  if (S.config?.authMode !== "entra" || !S.members) return "";
+  const myOid = S.me?.oid || "";
+  const isOwner = S.b.series.owner_oid === myOid;
+  if (isOwner) {
+    const rows = S.members.members.map((m) => `<div class="addrow" style="grid-template-columns:1fr auto auto;align-items:center">
+      <div>${esc(m.display_name || m.oid)}${m.email ? `<div class="note">${esc(m.email)}</div>` : ""}</div>
+      <select data-act="share-role" data-oid="${esc(m.oid)}">
+        <option value="viewer" ${m.role === "viewer" ? "selected" : ""}>Can view</option>
+        <option value="editor" ${m.role === "editor" ? "selected" : ""}>Can edit</option>
+      </select>
+      <button type="button" class="small danger" data-act="share-remove" data-oid="${esc(m.oid)}">Remove</button>
+    </div>`).join("") || `<div class="hint">Not shared with anyone yet.</div>`;
+    return `<h3>Sharing</h3>
+      ${rows}
+      <div class="addrow" style="grid-template-columns:1fr auto auto">
+        <input id="shareEmail" type="email" placeholder="Their exact sign-in email">
+        <select id="shareRole"><option value="viewer">Can view</option><option value="editor">Can edit</option></select>
+        <button type="button" data-act="share-add">Share</button>
+      </div>
+      <div class="hint">You must know the exact email they sign in with - there's no list of other users to browse.</div>`;
+  }
+  const mine = S.members.members.find((m) => m.oid === myOid);
+  const ownerLabel = S.members.owner_email
+    ? `${esc(S.members.owner_display_name)} (${esc(S.members.owner_email)})`
+    : esc(S.members.owner_display_name);
+  return `<h3>Sharing</h3>
+    <div class="hint">Shared by ${ownerLabel} - you can ${mine?.role === "editor" ? "edit" : "view"}.</div>
+    <button type="button" class="small danger" data-act="share-leave">Leave this series</button>`;
+}
+
 function seriesForm() {
   const s = S.b.series;
   const chapters = [...S.b.chapters].sort((a, b) => (a.number || 0) - (b.number || 0));
@@ -885,6 +930,7 @@ function seriesForm() {
     <div class="formbar"><div><button type="button" class="danger" data-act="delete-series">Delete series</button></div>
       <div><button class="primary" data-act="save" data-kind="series">Save</button></div></div>
   </form>
+  ${sharingSection()}
   <h3>Chapters (one Word doc each)</h3>
   ${chapters.map((c) => `<div class="rel"><div>Ch ${esc(c.number)} – ${esc(c.title)}</div>
     <button type="button" class="small danger" data-act="del-chapter" data-id="${c.id}">×</button></div>`).join("") || `<div class="hint">None yet.</div>`}
@@ -897,6 +943,7 @@ function seriesForm() {
   <h3>Feedback</h3>
   <div class="toolbar"><button type="button" data-act="log-issue">Log Issue</button>
     <button type="button" data-act="log-suggestion">Log Suggestion</button></div>
+  ${buildInfoHtml()}
   ${S.config?.authMode === "token" ? `
   <h3>Connection</h3>
   <label><span>API token (only if the server sets STORYBIBLE_TOKEN)</span>
@@ -944,6 +991,16 @@ async function loadAdminUsers() {
   if (S.view?.kind === "admin") render();
 }
 
+// The build stamp (#144), e.g. "Build v0.1.0-12-gabc1234 · 2026-10-03"; "" if the
+// server didn't report one.
+function buildInfoText() {
+  const v = S.config?.buildVersion;
+  return v ? `Build ${v}${S.config.buildDate ? ` · ${S.config.buildDate}` : ""}` : "";
+}
+function buildInfoHtml() {
+  const t = buildInfoText();
+  return t ? `<div class="hint" data-role="build-info">${esc(t)}</div>` : "";
+}
 function feedbackForm(kind) {
   const label = kind === "issue" ? "Log an issue" : "Log a suggestion";
   return `<form data-kind="feedback" data-feedback-kind="${kind}">
@@ -953,7 +1010,9 @@ function feedbackForm(kind) {
     ${field("description", "Description", "", "textarea", 'rows="6" maxlength="4000" placeholder="What happened, or what you\'d like to see"', true)}
     <div class="hint" data-role="public-notice"><b>This is posted as a public GitHub issue</b>, so anyone can read it.
       Don't include story text, character or place names from your series, or anything private.${
-        S.config?.authMode === "entra" ? " Your display name is added to it." : ""}</div>
+        S.config?.authMode === "entra" ? " Your display name is added to it." : ""}${
+        buildInfoText() ? " The build version and date are added too." : ""}</div>
+    ${buildInfoHtml()}
     <div class="formbar"><div></div>
       <div><button type="button" data-act="cancel">Cancel</button>
       <button class="primary" data-act="save-feedback">${label}</button></div></div>
@@ -990,7 +1049,8 @@ async function onClick(ev) {
   if (["save", "chip", "tl-chip", "tl-clear", "add-field", "add-rel", "del-rel", "delete", "delete-series",
        "add-chapter", "del-chapter", "cancel", "insert", "export", "import-pick", "save-token",
        "log-issue", "log-suggestion", "save-feedback", "sign-in", "sign-out",
-       "open-admin", "admin-block", "admin-unblock"].includes(act)) ev.preventDefault();
+       "open-admin", "admin-block", "admin-unblock",
+       "share-add", "share-remove", "share-leave"].includes(act)) ev.preventDefault();
   try {
     switch (act) {
       case "open": S.view = { kind: t.dataset.kind, id: t.dataset.id }; render(); window.scrollTo(0, 0); break;
@@ -1042,6 +1102,28 @@ async function onClick(ev) {
         rerenderKeepingEdits(); break;
       }
       case "del-chapter": await api(`/series/${S.sid}/chapters/${t.dataset.id}`, "DELETE"); await loadBundle(); rerenderKeepingEdits(); break;
+      case "share-add": {
+        const email = $("#shareEmail").value.trim(), role = $("#shareRole").value;
+        if (!email) { toast("Enter their exact sign-in email"); return; }
+        // Same two-step flow test_lookup_then_share_with_a_stranger exercises
+        // server-side: resolve the one exact email via the rate-limited
+        // lookup, then PUT the member - never a browsable list.
+        const found = await api(`/users/lookup?email=${encodeURIComponent(email)}`);
+        await api(`/series/${S.sid}/members/${found.oid}`, "PUT", { role });
+        await loadMembers(); rerenderKeepingEdits(); toast(`Shared with ${found.display_name}`);
+        break;
+      }
+      case "share-remove":
+        await api(`/series/${S.sid}/members/${t.dataset.oid}`, "DELETE");
+        await loadMembers(); rerenderKeepingEdits(); toast("Removed"); break;
+      case "share-leave": {
+        // Leaving removes the current user's own access, so there's
+        // nothing left to re-render for this series - go back to the
+        // series list the way deleting a series already does.
+        await api(`/series/${S.sid}/members/${S.me?.oid}`, "DELETE");
+        await loadSeriesList(); await selectSeries(S.seriesList[0]?.id);
+        toast("You left this series"); break;
+      }
       case "doc-link": saveDocLink({ series_id: S.sid, chapter_id: "" }); render(); break;
       case "insert": await insertText(t.dataset.text); break;
       case "export": {
@@ -1203,6 +1285,12 @@ function wire() {
     if (t.dataset.act === "tl-chapter") { S.tlChapter = t.value; render(); }
     if (t.dataset.act === "research-sort") { S.rsSort = t.value; render(); }
     if (t.dataset.act === "doc-chapter") saveDocLink({ series_id: S.sid, chapter_id: t.value });
+    if (t.dataset.act === "share-role") {
+      try {
+        await api(`/series/${S.sid}/members/${t.dataset.oid}`, "PUT", { role: t.value });
+        await loadMembers(); rerenderKeepingEdits(); toast("Role updated");
+      } catch (err) { toast(err.message, "error"); }
+    }
     if (t.id === "importFile" && t.files[0]) {
       try {
         const r = await api("/import", "POST", JSON.parse(await t.files[0].text()));

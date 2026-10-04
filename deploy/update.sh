@@ -40,7 +40,9 @@ fi
 git pull
 
 VERSION="$(git describe --tags --always --dirty)"
-docker build -t "story-bible:$VERSION" -t story-bible:current .
+# The same stamp is baked into the image (#144) so the pane, the help guide
+# and any issue filed from it say which build is running.
+docker build --build-arg BUILD_VERSION="$VERSION" --build-arg BUILD_DATE="$(date -u +%Y-%m-%d)"   -t "story-bible:$VERSION" -t story-bible:current .
 
 # deploy/compose.yaml (real values, gitignored - #38) vs. the tracked
 # deploy/compose.yaml.example template: first run on a fresh checkout,

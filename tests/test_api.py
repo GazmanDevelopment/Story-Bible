@@ -36,12 +36,13 @@ def test_flow():
     assert c.get(f"{base}/bundle").status_code == 404
 
 def test_health():
-    from app import __version__
+    from app import __version__, BUILD_VERSION, BUILD_DATE
     r = c.get("/api/health")
     assert r.status_code == 200
     body = r.json()
     assert isinstance(body.pop("backup_ok"), bool)  # depends on whether a backup has run (#68)
-    assert body == {"ok": True, "auth": False, "version": __version__}
+    assert body == {"ok": True, "auth": False, "version": __version__,
+                    "build": BUILD_VERSION, "buildDate": BUILD_DATE}
 
 def test_pragmas():
     """Per-request connections must have the hardening pragmas set, and

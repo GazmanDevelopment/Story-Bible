@@ -17,6 +17,7 @@
     <ol>
       <li><a href="#getting-started">Getting started and signing in</a></li>
       <li><a href="#series">Setting up a series</a></li>
+      <li><a href="#sharing">Sharing a series</a></li>
       <li><a href="#timeline">Setting up the timeline</a></li>
       <li><a href="#relationship-types">Relationship types</a></li>
       <li><a href="#adding">Adding characters, places and timeline events</a></li>
@@ -53,7 +54,17 @@
   <p><img src="img/series.png" width="360" height="1328" alt="The Series tab: settings, timeline anchor, chapters, backup and feedback." loading="lazy"></p>
   <p>Click <strong>Save</strong> after changing the settings. <strong>Delete series</strong> removes the series and everything in it, so export a backup first if you are unsure.</p>
 
-  <h2 id="timeline">3. Setting up the timeline</h2>
+  <h2 id="sharing">3. Sharing a series</h2>
+  <p>In the <strong>Series</strong> tab, under <strong>Sharing</strong>, you can give someone else access to the whole series - its characters, places, timeline, research and chapters.</p>
+  <ul>
+    <li>You must know the <strong>exact email address</strong> they sign in with. There is no list of other users to search or browse - this is deliberate, for everyone's privacy.</li>
+    <li>Choose <strong>Can view</strong> (read everything) or <strong>Can edit</strong> (read and write) for each person, and change it at any time from the drop-down next to their name.</li>
+    <li>Click <strong>Remove</strong> to revoke someone's access at any time.</li>
+  </ul>
+  <p><img src="img/sharing.png" width="360" height="1500" alt="The Sharing section of the Series tab, showing a shared viewer and the add-by-email row." loading="lazy"></p>
+  <p>If someone shares a series with you, open it from the series drop-down at the top, then check the <strong>Series</strong> tab: it shows who shared it with you and whether you can view or edit. Click <strong>Leave this series</strong> at any time to remove your own access - the owner can always share it with you again later.</p>
+
+  <h2 id="timeline">4. Setting up the timeline</h2>
   <p>In the <strong>Series</strong> tab, under <strong>Timeline anchor</strong>, pick how your story measures time:</p>
   <ul>
     <li><strong>Relative (no real dates)</strong>: events are placed by how long after the start they happen, such as 2 years, 3 months. Good for fantasy and invented calendars.</li>
@@ -61,12 +72,12 @@
   </ul>
   <p><strong>Start label</strong> names the starting point (for example &ldquo;Story start&rdquo;). Events are stored as offsets from the anchor, so changing the anchor later moves the whole timeline with it.</p>
 
-  <h2 id="relationship-types">4. Relationship types</h2>
+  <h2 id="relationship-types">5. Relationship types</h2>
   <p>When you add a relationship between two characters, the type box suggests these as you type:</p>
   <p>married to, partner of, mistress of, lover of, ex of, friend of, best friend of, sibling of, parent of, boss of, colleague of, neighbour of, rival of, flirts with.</p>
   <p>They are only suggestions. You can type anything you like. To add your own suggestions for a series (on top of the defaults above), add them under <strong>Relationship type suggestions</strong> in the <strong>Series</strong> tab (one per line, up to 200) and save.</p>
 
-  <h2 id="adding">5. Adding characters, places and timeline events</h2>
+  <h2 id="adding">6. Adding characters, places and timeline events</h2>
   <p>Use the <strong>Characters</strong>, <strong>Places</strong> and <strong>Timeline</strong> tabs. Each has an add button at the top; click an existing item to edit it. Only the name (or title) is required.</p>
   <ul>
     <li><strong>Characters</strong>: name, role, aliases, age (a number), appearance, your series' custom fields, likes and limits, backstory and notes.</li>
@@ -81,7 +92,7 @@
   <p><img src="img/event.png" width="360" height="709" alt="A new timeline event with a character linked." loading="lazy"></p>
   <p>Remember to click <strong>Save</strong>. If you try to leave with unsaved changes, the app asks first.</p>
 
-  <h2 id="linking">6. Linking it all together</h2>
+  <h2 id="linking">7. Linking it all together</h2>
   <ul>
     <li><strong>Relationships</strong>: on a character, choose another character, a type, and click <strong>Add</strong>.</li>
     <li><strong>Characters in a place or event</strong>: on a place or timeline event, click character names to switch them on or off.</li>
@@ -89,7 +100,7 @@
     <li><strong>Find</strong> (Word only): select a name in your manuscript and click <strong>Find</strong> to jump to that character or place.</li>
   </ul>
 
-  <h2 id="research">7. Research entries</h2>
+  <h2 id="research">8. Research entries</h2>
   <p>The <strong>Research</strong> tab is for notes you gather while writing. Each entry has a title, the date entered, an optional chapter, rich-text notes, and links to characters, places and timeline events.</p>
   <p><img src="img/research.png" width="360" height="1058" alt="A research entry with an embedded image and linked characters." loading="lazy"></p>
   <h3>Images</h3>
@@ -101,7 +112,7 @@
     <li>An entry can hold about 8 million characters in total, and images count toward that, so a few photos are fine but dozens in one entry may not be. Split them over several entries.</li>
   </ul>
 
-  <h2 id="backup">8. Backing up and restoring</h2>
+  <h2 id="backup">9. Backing up and restoring</h2>
   <p>In the <strong>Series</strong> tab, under <strong>Backup</strong>:</p>
   <ul>
     <li><strong>Export JSON</strong> downloads the current series as a file you can keep anywhere.</li>
@@ -109,15 +120,16 @@
   </ul>
   <p>The server also takes its own nightly backup, but an export of your own is the quickest way to protect a series before a big change.</p>
 
-  <h2 id="feedback">9. Feedback and logging issues</h2>
-  <p>In the <strong>Series</strong> tab, under <strong>Feedback</strong>, click <strong>Log Issue</strong> for something broken or <strong>Log Suggestion</strong> for an idea. Give it a title (3&ndash;120 characters) and a description (up to 4000). There is a limit of 5 reports per hour.</p>
+  <h2 id="feedback">10. Feedback and logging issues</h2>
+  <p>In the <strong>Series</strong> tab, under <strong>Feedback</strong>, click <strong>Log Issue</strong> for something broken or <strong>Log Suggestion</strong> for an idea. Give it a title (3&ndash;120 characters) and a description (up to 4000). There is a limit of 5 reports per hour. The build version and date of the app are added to every report automatically, so we know which version you were using.</p>
+  <p>You can see the build version and date yourself at the bottom of the <strong>Series</strong> tab, under <strong>Feedback</strong>, and on the report form. Quote them if you contact us another way.</p>
   <p><img src="img/log-issue.png" width="360" height="558" alt="The Log an issue form." loading="lazy"></p>
   <div class="tip"><strong>These are public.</strong> Issues and suggestions are posted on GitHub where anyone can read them. Never include story content, personal details or passwords.</div>
 
-  <h2 id="privacy">10. Your data and privacy</h2>
+  <h2 id="privacy">11. Your data and privacy</h2>
   <p>Your series belongs to you. You can download all of it at any time (see <a href="#delete-account">below</a>) or one series at a time with <strong>Export JSON</strong> (see <a href="#backup">Backing up</a>). Read the full <a href="../privacy.html">privacy policy</a> and <a href="../terms.html">terms of use</a>. In the pane, they are linked at the bottom of your <a href="#delete-account">account page</a> once you are signed in.</p>
 
-  <h2 id="delete-account">11. Downloading your data and deleting your account</h2>
+  <h2 id="delete-account">12. Downloading your data and deleting your account</h2>
   <p>When you are signed in, an <strong>Account</strong> button appears next to <strong>Sign out</strong>.</p>
   <p><img src="img/signed-in.png" width="360" height="582" alt="The top of the pane when signed in, showing the Account and Sign out buttons." loading="lazy"></p>
   <p>Click it to open your account page. The privacy policy and terms of use are linked at the bottom of this page.</p>

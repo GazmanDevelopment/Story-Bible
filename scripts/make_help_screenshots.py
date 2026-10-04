@@ -53,7 +53,9 @@ def main() -> None:
     os.close(fd)
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
-    env = {**os.environ, "STORYBIBLE_DB": db, "AUTH_MODE": "none"}
+    # A fixed build stamp (#144) so regenerating the screenshots never changes them just because the date did.
+    env = {**os.environ, "STORYBIBLE_DB": db, "AUTH_MODE": "none",
+           "BUILD_VERSION": "v0.1.0", "BUILD_DATE": "2026-01-01"}
     for var in ("STORYBIBLE_TOKEN", "ENTRA_TENANT_ID", "ENTRA_CLIENT_ID", "ALLOWED_OIDS"):
         env.pop(var, None)
     log = tempfile.TemporaryFile()
@@ -177,6 +179,20 @@ def shoot(base: str, img_path: Path) -> None:
               renderHeader();
             }""")
             snap(pg, "signed-in")
+
+            # Sharing panel (#148), also faked client-side: entra mode plus
+            # a plausible member list, nothing sent to the server. 'local'
+            # matches the demo series' real none-mode owner oid, so the
+            # owner's (not a member's) view of the panel renders.
+            pg.evaluate("""async () => {
+              S.me = {...S.me, oid: 'local'};
+              S.members = {owner_oid: 'local', owner_display_name: 'Alex Morgan', owner_email: 'alex.morgan@example.com',
+                members: [{oid: 'friend-oid', role: 'viewer', display_name: 'Jamie Patel', email: 'jamie.patel@example.com'}]};
+              S.tab = 'series'; S.view = null; render();
+            }""")
+            pg.wait_for_selector("text=Sharing")
+            snap(pg, "sharing")
+
             pg.click("[data-act=open-account]")
             pg.wait_for_selector("#deleteConfirm")
             snap(pg, "account")

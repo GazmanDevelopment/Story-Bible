@@ -112,7 +112,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import __version__
+from . import __version__, BUILD_VERSION, BUILD_DATE
 from . import auth
 from . import backup as backup_mod
 from . import github_feedback as feedback_mod
@@ -1001,6 +1001,8 @@ class HealthResponse(BaseModel):
     ok: bool
     auth: bool
     version: str
+    build: str = ""       # build stamp (#144)
+    buildDate: str = ""
     backup_ok: bool
 
 
@@ -1014,7 +1016,7 @@ def health():
     # yet for up to a day. Monitoring alerts on backup_ok=false separately
     # (docs/MONITORING.md).
     body: dict[str, Any] = {"ok": True, "auth": auth.AUTH_MODE != "none", "version": __version__,
-                            "backup_ok": _backup_ok()}
+                            "build": BUILD_VERSION, "buildDate": BUILD_DATE, "backup_ok": _backup_ok()}
     if not _db_ok():
         body.update(ok=False, error="database unavailable")
         return JSONResponse(body, status_code=503)
@@ -1033,6 +1035,8 @@ class ConfigOut(BaseModel):
     privacyUrl: str = ""    # optional legal links shown before first sign-in
     termsUrl: str = ""
     policyVersion: str = ""  # current privacy policy / terms version (#111)
+    buildVersion: str = ""   # build stamp shown in the pane (#144)
+    buildDate: str = ""
 
 
 def _https_url(name: str) -> str:
@@ -1059,6 +1063,8 @@ def get_config():
         "privacyUrl": _https_url("PRIVACY_URL"),
         "termsUrl": _https_url("TERMS_URL"),
         "policyVersion": POLICY_VERSION,
+        "buildVersion": BUILD_VERSION,
+        "buildDate": BUILD_DATE,
     }
 
 
@@ -1595,6 +1601,11 @@ class MemberOut(BaseModel):
 
 class MembersOut(BaseModel):
     owner_oid: str
+    # #148: so a member can see who shared the series with them - scoped to
+    # people who already have access to this specific series (require_access
+    # below), never a general directory (that's /api/users/lookup's job, #88).
+    owner_display_name: str
+    owner_email: str
     members: list[MemberOut]
 
 
@@ -1607,7 +1618,25 @@ def list_members(series_id: str, user: auth.CurrentUser = Depends(require_policy
             "FROM members LEFT JOIN users ON users.oid = members.oid WHERE series_id=?",
             (series_id,),
         ).fetchall()
-    return {"owner_oid": row["owner_oid"], "members": [dict(r) for r in rows]}
+        owner_row = con.execute(
+            "SELECT display_name, email FROM users WHERE oid=?", (row["owner_oid"],)
+        ).fetchone()
+        # Same fallback as display_name_for() (a none/token-mode synthetic
+        # owner, or one whose account was since deleted, never has a `users`
+        # row) - inlined so this doesn't run a second, otherwise-identical
+        # query just to get the name too.
+        if owner_row:
+            owner_display_name = owner_row["display_name"]
+            owner_email = owner_row["email"]
+        else:
+            owner_display_name = _SYNTHETIC_DISPLAY_NAMES.get(row["owner_oid"], row["owner_oid"])
+            owner_email = ""
+    return {
+        "owner_oid": row["owner_oid"],
+        "owner_display_name": owner_display_name,
+        "owner_email": owner_email,
+        "members": [dict(r) for r in rows],
+    }
 
 
 class MemberRoleOut(BaseModel):
