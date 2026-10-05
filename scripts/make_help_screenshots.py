@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 VIEW_H = 1500
 OUT = ROOT / "docs" / "help" / "img"
 sys.path.insert(0, str(ROOT / "tests"))
-from test_ui import FAKE_OFFICE  # noqa: E402  (same Office stub the UI tests use)
+from test_ui import FAKE_OFFICE, _gdocs_page  # noqa: E402  (same Office stub and fake Apps Script the UI tests use)
 
 
 def _free_port() -> int:
@@ -73,6 +73,7 @@ def main() -> None:
             raise RuntimeError("demo server did not start")
         _sample_image(img_path)
         shoot(base, img_path)
+        shoot_gdocs(base)
     finally:
         proc.terminate()
         proc.wait(timeout=5)
@@ -161,7 +162,7 @@ def shoot(base: str, img_path: Path) -> None:
             cancel(pg)
 
             pg.click("#tabs >> text=Series")
-            pg.wait_for_selector("text=Chapters (one Word doc each)")
+            pg.wait_for_selector("text=Chapters (one document each)")
             snap(pg, "series")
             pg.click("[data-act=log-issue]")
             pg.wait_for_selector("form[data-kind=feedback]")
@@ -213,6 +214,24 @@ def shoot(base: str, img_path: Path) -> None:
             pg.close()
         finally:
             browser.close()
+
+
+def shoot_gdocs(base: str) -> None:
+    """The pane inside the real Google Docs sidebar shell (gdocs/Sidebar.html),
+    with only Apps Script faked, as the UI tests do. Runs after shoot() because
+    Playwright's sync API can't be nested."""
+    name = "gdocs-sidebar"
+    with _gdocs_page(base) as (pg, fr, _errors):
+        fr.locator(".list li").first.wait_for()
+        fr.locator("[data-act=doc-link]").click()
+        fr.locator("[data-act=doc-chapter]").wait_for()
+        values = fr.locator("[data-act=doc-chapter] option").evaluate_all("els => els.map(e => e.value)")
+        fr.locator("[data-act=doc-chapter]").select_option(next(v for v in values if v))
+        pg.wait_for_function("(window.__props.storybible || '').includes('chapter_id')")
+        pg.wait_for_timeout(250)
+        # Same clip-to-content as snap() above; the frame fills the page from the top left.
+        h = fr.locator("#main").evaluate("el => Math.ceil(el.getBoundingClientRect().bottom + window.scrollY) + 12")
+        pg.screenshot(path=str(OUT / f"{name}.png"), clip={"x": 0, "y": 0, "width": 360, "height": min(h, 780)})
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@
   <nav class="toc" aria-label="Contents">
     <ol>
       <li><a href="#getting-started">Getting started and signing in</a></li>
+      <li><a href="#google-docs">Using Story Bible in Google Docs</a></li>
       <li><a href="#series">Setting up a series</a></li>
       <li><a href="#sharing">Sharing a series</a></li>
       <li><a href="#timeline">Setting up the timeline</a></li>
@@ -31,30 +32,46 @@
   </nav>
 
   <h2 id="getting-started">1. Getting started and signing in</h2>
-  <p>You can use Story Bible in two ways, and both show the same data:</p>
+  <p>You can use Story Bible in three ways, and all of them show the same data:</p>
   <ul>
     <li><strong>In Word</strong> as a task pane. Install it from the <a href="../">install page</a>, then open it from the Home tab.</li>
-    <li><strong>In a browser</strong> at <a href="https://storybible.huscroft.com.au">storybible.huscroft.com.au</a>. No Word needed. The only things missing are the Word-only features: <strong>Find</strong>, linking a chapter to a Word document, and <strong>Insert name at cursor</strong>.</li>
+    <li><strong>In Google Docs</strong> as a sidebar. See <a href="#google-docs">Using Story Bible in Google Docs</a>.</li>
+    <li><strong>In a browser</strong> at <a href="https://storybible.huscroft.com.au">storybible.huscroft.com.au</a>. No Word or Google Docs needed. The only things missing are the features that need a document beside them: <strong>Find</strong>, linking a chapter to a document, and <strong>Insert name at cursor</strong>.</li>
   </ul>
   <p>Click <strong>Sign in</strong> at the top and sign in with your Microsoft account in the window that opens. Your name and a <strong>Sign out</strong> button then appear in its place.</p>
-  <p><img src="img/browser-characters.png" width="360" height="521" alt="The Characters tab in a browser, with no Word-only buttons." loading="lazy"></p>
+  <p><img src="img/browser-characters.png" width="360" height="521" alt="The Characters tab in a browser, with no Find button or document link, which need a document beside the pane." loading="lazy"></p>
   <div class="tip"><strong>No Microsoft account yet?</strong> You don't need a Microsoft email address. You can create a free Microsoft account using your existing Gmail or other email address, then sign in to Story Bible with it. Microsoft's guide is <a href="https://support.microsoft.com/en-us/topic/a84675c3-3e9e-17cf-2911-3d56b15c0aaf">How to create a new Microsoft account</a>: choose <strong>Create one</strong>, then enter the email address you already use.</div>
   <p>The first time you sign in, you are asked to accept the terms and the privacy policy before you can use the app. Read them with the links on that screen, then click <strong>Accept and continue</strong>. You are asked again only if the policy is updated.</p>
   <p><img src="img/policy-gate.png" width="360" height="391" alt="The screen shown after signing in for the first time, with links to the privacy policy and terms and an Accept and continue button." loading="lazy"></p>
   <div class="tip">If nothing happens when you click <strong>Sign in</strong> in a browser, your browser has probably blocked the pop-up. Allow pop-ups for the site and try again.</div>
 
-  <h2 id="series">2. Setting up a series</h2>
+  <h2 id="google-docs">2. Using Story Bible in Google Docs</h2>
+  <p>Story Bible also works as a sidebar in Google Docs, with the same series, characters and timeline as Word and the browser. It is currently available as a private test: it is added to a document with a small script, and the steps are in the <a href="https://github.com/GazmanDevelopment/Story-Bible/blob/main/gdocs/README.md">Google Docs setup notes</a>.</p>
+  <ol>
+    <li>Open your document and choose <strong>Story Bible</strong> &rarr; <strong>Open sidebar</strong> from the menu bar. The first time, Google asks you to authorise the script; it only reads the text you have selected and inserts names where you ask.</li>
+    <li>Click <strong>Sign in</strong> and sign in with your Microsoft account, as in <a href="#getting-started">Getting started</a>. If you don't have one, the tip there explains how to create one from your Gmail address.</li>
+    <li>Use the pane as you would in Word.</li>
+  </ol>
+  <p><img src="img/gdocs-sidebar.png" width="360" height="568" alt="The Story Bible sidebar in Google Docs, showing the Find button and the document linked to a chapter." loading="lazy"></p>
+  <ul>
+    <li><strong>Find</strong>: select a name in your document and click <strong>Find</strong> to jump to that character or place.</li>
+    <li><strong>Insert name at cursor</strong>: open a character and click it. The name replaces whatever you have selected, or goes at the cursor if nothing is selected.</li>
+    <li><strong>Linking a document</strong>: click <strong>Link to this series</strong>, then pick a chapter if you like. The link is remembered with the document, so it is still there next time you open it.</li>
+    <li><strong>Open in New Tab</strong>: <strong>Story Bible</strong> &rarr; <strong>Open in New Tab</strong> opens Story Bible in a browser tab of its own, handy when you want more room. It works like the browser version, so <strong>Find</strong> and <strong>Insert name at cursor</strong> are not available there. If no tab opens, your browser blocked the pop-up: click the link in the small window that appears.</li>
+  </ul>
+
+  <h2 id="series">3. Setting up a series</h2>
   <p>Everything lives inside a series. The first time you open the app, click <strong>+ New series</strong> and give it a name. Use the drop-down at the top to switch between series.</p>
   <p>Open the <strong>Series</strong> tab to edit the series:</p>
   <ul>
     <li><strong>Series name</strong> and <strong>Premise / notes</strong>.</li>
     <li><strong>Default character fields</strong>: the extra fields every character gets, one per line. They start as Build, Skin, Tattoos, Piercings, Distinguishing marks, and Voice &amp; mannerisms. Edit the list to suit your story.</li>
-    <li><strong>Chapters</strong>: type a number and title and click <strong>Add</strong>. In Word, you can link each chapter to the Word document it lives in, which makes Find and chapter links work.</li>
+    <li><strong>Chapters</strong>: type a number and title and click <strong>Add</strong>. In Word or Google Docs, you can link each chapter to the document it lives in, which makes Find and chapter links work.</li>
   </ul>
-  <p><img src="img/series.png" width="360" height="1328" alt="The Series tab: settings, timeline anchor, chapters, backup and feedback." loading="lazy"></p>
+  <p><img src="img/series.png" width="360" height="1371" alt="The Series tab: settings, timeline anchor, chapters, backup and feedback." loading="lazy"></p>
   <p>Click <strong>Save</strong> after changing the settings. <strong>Delete series</strong> removes the series and everything in it, so export a backup first if you are unsure.</p>
 
-  <h2 id="sharing">3. Sharing a series</h2>
+  <h2 id="sharing">4. Sharing a series</h2>
   <p>In the <strong>Series</strong> tab, under <strong>Sharing</strong>, you can give someone else access to the whole series - its characters, places, timeline, research and chapters.</p>
   <ul>
     <li>You must know the <strong>exact email address</strong> they sign in with. There is no list of other users to search or browse - this is deliberate, for everyone's privacy.</li>
@@ -64,7 +81,7 @@
   <p><img src="img/sharing.png" width="360" height="1500" alt="The Sharing section of the Series tab, showing a shared viewer and the add-by-email row." loading="lazy"></p>
   <p>If someone shares a series with you, open it from the series drop-down at the top, then check the <strong>Series</strong> tab: it shows who shared it with you and whether you can view or edit. Click <strong>Leave this series</strong> at any time to remove your own access - the owner can always share it with you again later.</p>
 
-  <h2 id="timeline">4. Setting up the timeline</h2>
+  <h2 id="timeline">5. Setting up the timeline</h2>
   <p>In the <strong>Series</strong> tab, under <strong>Timeline anchor</strong>, pick how your story measures time:</p>
   <ul>
     <li><strong>Relative (no real dates)</strong>: events are placed by how long after the start they happen, such as 2 years, 3 months. Good for fantasy and invented calendars.</li>
@@ -72,12 +89,12 @@
   </ul>
   <p><strong>Start label</strong> names the starting point (for example &ldquo;Story start&rdquo;). Events are stored as offsets from the anchor, so changing the anchor later moves the whole timeline with it.</p>
 
-  <h2 id="relationship-types">5. Relationship types</h2>
+  <h2 id="relationship-types">6. Relationship types</h2>
   <p>When you add a relationship between two characters, the type box suggests these as you type:</p>
   <p>married to, partner of, mistress of, lover of, ex of, friend of, best friend of, sibling of, parent of, boss of, colleague of, neighbour of, rival of, flirts with.</p>
   <p>They are only suggestions. You can type anything you like. To add your own suggestions for a series (on top of the defaults above), add them under <strong>Relationship type suggestions</strong> in the <strong>Series</strong> tab (one per line, up to 200) and save.</p>
 
-  <h2 id="adding">6. Adding characters, places and timeline events</h2>
+  <h2 id="adding">7. Adding characters, places and timeline events</h2>
   <p>Use the <strong>Characters</strong>, <strong>Places</strong> and <strong>Timeline</strong> tabs. Each has an add button at the top; click an existing item to edit it. Only the name (or title) is required.</p>
   <ul>
     <li><strong>Characters</strong>: name, role, aliases, age (a number), appearance, your series' custom fields, likes and limits, backstory and notes.</li>
@@ -88,19 +105,19 @@
   <p><img src="img/character.png" width="360" height="1500" alt="A character form with appearance fields, relationships and timeline." loading="lazy"></p>
   <p><img src="img/relationship.png" width="360" height="1500" alt="Adding a relationship: type a relationship, pick the other character, then click Add." loading="lazy"></p>
   <p><img src="img/place.png" width="360" height="736" alt="A place form." loading="lazy"></p>
-  <p><img src="img/timeline.png" width="360" height="748" alt="The Timeline tab." loading="lazy"></p>
+  <p><img src="img/timeline.png" width="360" height="835" alt="The Timeline tab." loading="lazy"></p>
   <p><img src="img/event.png" width="360" height="709" alt="A new timeline event with a character linked." loading="lazy"></p>
   <p>Remember to click <strong>Save</strong>. If you try to leave with unsaved changes, the app asks first.</p>
 
-  <h2 id="linking">7. Linking it all together</h2>
+  <h2 id="linking">8. Linking it all together</h2>
   <ul>
     <li><strong>Relationships</strong>: on a character, choose another character, a type, and click <strong>Add</strong>.</li>
     <li><strong>Characters in a place or event</strong>: on a place or timeline event, click character names to switch them on or off.</li>
     <li><strong>Research</strong> entries can link to characters, places and events the same way.</li>
-    <li><strong>Find</strong> (Word only): select a name in your manuscript and click <strong>Find</strong> to jump to that character or place.</li>
+    <li><strong>Find</strong> (in Word or Google Docs): select a name in your manuscript and click <strong>Find</strong> to jump to that character or place.</li>
   </ul>
 
-  <h2 id="research">8. Research entries</h2>
+  <h2 id="research">9. Research entries</h2>
   <p>The <strong>Research</strong> tab is for notes you gather while writing. Each entry has a title, the date entered, an optional chapter, rich-text notes, and links to characters, places and timeline events.</p>
   <p><img src="img/research.png" width="360" height="1058" alt="A research entry with an embedded image and linked characters." loading="lazy"></p>
   <h3>Images</h3>
@@ -112,7 +129,7 @@
     <li>An entry can hold about 8 million characters in total, and images count toward that, so a few photos are fine but dozens in one entry may not be. Split them over several entries.</li>
   </ul>
 
-  <h2 id="backup">9. Backing up and restoring</h2>
+  <h2 id="backup">10. Backing up and restoring</h2>
   <p>In the <strong>Series</strong> tab, under <strong>Backup</strong>:</p>
   <ul>
     <li><strong>Export JSON</strong> downloads the current series as a file you can keep anywhere.</li>
@@ -120,20 +137,20 @@
   </ul>
   <p>The server also takes its own nightly backup, but an export of your own is the quickest way to protect a series before a big change.</p>
 
-  <h2 id="feedback">10. Feedback and logging issues</h2>
+  <h2 id="feedback">11. Feedback and logging issues</h2>
   <p>In the <strong>Series</strong> tab, under <strong>Feedback</strong>, click <strong>Log Issue</strong> for something broken or <strong>Log Suggestion</strong> for an idea. Give it a title (3&ndash;120 characters) and a description (up to 4000). There is a limit of 5 reports per hour. The build version and date of the app are added to every report automatically, so we know which version you were using.</p>
   <p>You can see the build version and date yourself at the bottom of the <strong>Series</strong> tab, under <strong>Feedback</strong>, and on the report form. Quote them if you contact us another way.</p>
-  <p><img src="img/log-issue.png" width="360" height="558" alt="The Log an issue form." loading="lazy"></p>
+  <p><img src="img/log-issue.png" width="360" height="601" alt="The Log an issue form." loading="lazy"></p>
   <div class="tip"><strong>These are public.</strong> Issues and suggestions are posted on GitHub where anyone can read them. Never include story content, personal details or passwords.</div>
 
-  <h2 id="privacy">11. Your data and privacy</h2>
+  <h2 id="privacy">12. Your data and privacy</h2>
   <p>Your series belongs to you. You can download all of it at any time (see <a href="#delete-account">below</a>) or one series at a time with <strong>Export JSON</strong> (see <a href="#backup">Backing up</a>). Read the full <a href="../privacy.html">privacy policy</a> and <a href="../terms.html">terms of use</a>. In the pane, they are linked at the bottom of your <a href="#delete-account">account page</a> once you are signed in.</p>
 
-  <h2 id="delete-account">12. Downloading your data and deleting your account</h2>
+  <h2 id="delete-account">13. Downloading your data and deleting your account</h2>
   <p>When you are signed in, an <strong>Account</strong> button appears next to <strong>Sign out</strong>.</p>
-  <p><img src="img/signed-in.png" width="360" height="582" alt="The top of the pane when signed in, showing the Account and Sign out buttons." loading="lazy"></p>
+  <p><img src="img/signed-in.png" width="360" height="624" alt="The top of the pane when signed in, showing the Account and Sign out buttons." loading="lazy"></p>
   <p>Click it to open your account page. The privacy policy and terms of use are linked at the bottom of this page.</p>
-  <p><img src="img/account.png" width="360" height="633" alt="The account page with Download my data and Delete my account sections." loading="lazy"></p>
+  <p><img src="img/account.png" width="360" height="679" alt="The account page with Download my data and Delete my account sections." loading="lazy"></p>
   <h3>Download my data</h3>
   <p>Click <strong>Download my data</strong> to save a file containing your account details and every series you own. Do this first if you want to keep your work.</p>
   <h3>Delete my account</h3>
@@ -142,10 +159,10 @@
     <li>Type your email address in the confirmation box.</li>
     <li>Click <strong>Delete my account and data</strong>. You are signed out straight away.</li>
   </ol>
-  <p><img src="img/delete-account.png" width="360" height="633" alt="The delete section with the email address typed into the confirmation box." loading="lazy"></p>
+  <p><img src="img/delete-account.png" width="360" height="679" alt="The delete section with the email address typed into the confirmation box." loading="lazy"></p>
   <p>This deletes your account and every series you own, including characters, places, timeline, research and chapters. Anyone you shared a series with loses access to it. You are also removed from series other people shared with you, and your name on their entries is replaced by &ldquo;Deleted user&rdquo;.</p>
   <h3 id="inactive-accounts">Inactive accounts</h3>
-  <p>If nobody signs in to your account for 24 months, it is deleted along with every series you own, just as if you had deleted it yourself. Before that we email you at 18, 20 and 23 months, if we have a usable email address for you. To keep your account, open the add-in in Word and sign in; that starts the 24 months again. To keep a copy of your work instead, use <strong>Download my data</strong> first.</p>
+  <p>If nobody signs in to your account for 24 months, it is deleted along with every series you own, just as if you had deleted it yourself. Before that we email you at 18, 20 and 23 months, if we have a usable email address for you. To keep your account, open Story Bible (in Word, Google Docs or a browser) and sign in; that starts the 24 months again. To keep a copy of your work instead, use <strong>Download my data</strong> first.</p>
   <div class="tip"><strong>What is not removed straight away.</strong> The server's nightly backups keep a copy until they age out (14 days by default). Issues and suggestions you posted through <strong>Feedback</strong> are public on GitHub and can't be removed from the pane. You can sign in again later with the same Microsoft account to start fresh.</div>
 </main>
 </body>

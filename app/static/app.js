@@ -13,7 +13,7 @@ const S = {
   filter: "",
   tlChapter: "", tlChars: [], tlLocs: [],
   rsSort: "date_desc",  // research list: date_desc | date_asc | title
-  docLink: null,      // {series_id, chapter_id} stored in the Word document
+  docLink: null,      // {series_id, chapter_id} stored in the document (Word or Google Docs)
   me: null,           // {isAdmin, ...} from GET /api/me - only fetched in entra mode
   adminError: null,
   adminUsers: null,   // admin view's user list
@@ -885,7 +885,7 @@ function seriesForm() {
       <div><button class="primary" data-act="save" data-kind="series">Save</button></div></div>
   </form>
   ${sharingSection()}
-  <h3>Chapters (one Word doc each)</h3>
+  <h3>Chapters (one document each)</h3>
   ${chapters.map((c) => `<div class="rel"><div>Ch ${esc(c.number)} – ${esc(c.title)}</div>
     <button type="button" class="small danger" data-act="del-chapter" data-id="${c.id}">×</button></div>`).join("") || `<div class="hint">None yet.</div>`}
   <div class="addrow" style="grid-template-columns:60px 1fr auto">
