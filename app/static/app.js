@@ -1,10 +1,10 @@
 /* Story Bible task pane - demo build.
- * Plain JS, no build step. Works inside Word (Office.js) and in a normal browser.
+ * Plain JS, no build step. Works inside Word (Office.js) and in a normal browser;
+ * everything document-specific goes through `host` (host.js).
  */
 "use strict";
 
 const S = {
-  inWord: false,
   seriesList: [],
   sid: null,          // current series id
   b: null,            // bundle for current series
@@ -195,10 +195,6 @@ function ageAt(c, e) {
 // fallback below.
 function msalScope() { return `api://${S.config.clientId}/access_as_user`; }
 
-function naaSupported() {
-  return S.inWord && !!window.Office?.context?.requirements?.isSetSupported?.("NestedAppAuth", "1.1");
-}
-
 async function initAuth() {
   try {
     S.config = await (await fetch("/api/config")).json();
@@ -213,8 +209,7 @@ async function initAuth() {
     cache: { cacheLocation: "localStorage" },  // survives the task pane closing/reopening with a document
   };
   try {
-    const useNaa = !S.inWord || naaSupported();
-    if (useNaa) {
+    if (host.nestedAuth()) {
       msalPca = await msal.createNestablePublicClientApplication(msalConfig);
     } else {
       msalPca = new msal.PublicClientApplication(msalConfig);
@@ -241,49 +236,19 @@ async function getAuthToken() {
 async function signIn() {
   if (!msalPca) return;
   try {
-    if (!S.inWord || naaSupported()) {
+    if (host.nestedAuth()) {
       const result = await msalPca.acquireTokenPopup({ scopes: [msalScope()] });
       msalAccount = result.account;
     } else {
-      await signInViaDialog();
+      // Old Word without NAA: the interactive part runs in a separate dialog
+      // (see host.js); this instance then just re-reads the account both
+      // pages share via the same localStorage cache.
+      await host.openAuthDialog();
+      msalAccount = msalPca.getAllAccounts()[0] || null;
     }
   } catch (err) {
     toast("Sign-in failed: " + err.message, "error");
   }
-}
-
-// Perpetual Office without NAA can't do a normal popup from the task pane,
-// so the interactive part happens in a separate Office dialog (a small
-// same-origin page, auth-dialog.html) running the standard redirect flow;
-// this instance then just re-reads the account both pages share via the
-// same localStorage cache.
-function signInViaDialog() {
-  return new Promise((resolve, reject) => {
-    Office.context.ui.displayDialogAsync(
-      window.location.origin + "/auth-dialog.html",
-      { height: 60, width: 30 },
-      (asyncResult) => {
-        if (asyncResult.status === Office.AsyncResultStatus.Failed) {
-          reject(new Error(asyncResult.error.message)); return;
-        }
-        const dialog = asyncResult.value;
-        dialog.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => {
-          dialog.close();
-          const msg = JSON.parse(arg.message);
-          if (!msg.ok) { reject(new Error(msg.error || "Sign-in failed")); return; }
-          msalAccount = msalPca.getAllAccounts()[0] || null;
-          resolve();
-        });
-        // The user closing the dialog (or Entra sign-in erroring out before
-        // messageParent ever runs) fires this instead of DialogMessageReceived -
-        // without handling it too, the promise above never settles and the
-        // Sign in button just looks permanently stuck on that attempt.
-        dialog.addEventHandler(Office.EventType.DialogEventReceived, () => {
-          reject(new Error("Sign-in cancelled"));
-        });
-      },
-    );
-  });
 }
 
 async function signOut() {
@@ -293,26 +258,15 @@ async function signOut() {
   msalAccount = null;
 }
 
-// ---------------------------------------------------------------- Word glue
+// ------------------------------------------------------------- document link
+// The document itself (Word, ...) is reached only through `host` (host.js).
 async function readDocLink() {
-  if (!S.inWord) return;
-  S.docLink = Office.context.document.settings.get("storybible") || null;
+  if (!host.hasDocument) return;
+  S.docLink = await host.readDocLink();
 }
 function saveDocLink(link) {
   S.docLink = link;
-  Office.context.document.settings.set("storybible", link);
-  Office.context.document.settings.saveAsync(() => toast("Document linked"));
-}
-async function wordSelection() {
-  return Word.run(async (ctx) => {
-    const r = ctx.document.getSelection(); r.load("text"); await ctx.sync();
-    return (r.text || "").trim();
-  });
-}
-async function insertText(text) {
-  await Word.run(async (ctx) => {
-    ctx.document.getSelection().insertText(text, "Replace"); await ctx.sync();
-  });
+  host.saveDocLink(link).then(() => toast("Document linked"), (err) => toast(err.message, "error"));
 }
 
 // ------------------------------------------------------------------- loading
@@ -395,7 +349,7 @@ function renderHeader() {
     : `<button class="small primary" data-act="sign-in">Sign in</button>`);
 
   const lb = $("#linkBar");
-  if (!S.inWord || !S.b) { lb.innerHTML = ""; return; }
+  if (!host.hasDocument || !S.b) { lb.innerHTML = ""; return; }
   const linked = S.docLink && S.docLink.series_id === S.sid;
   const chOpts = `<option value="">(no chapter)</option>` + [...S.b.chapters]
     .sort((a, b) => (a.number || 0) - (b.number || 0))
@@ -682,7 +636,7 @@ function characterForm(c, isNew) {
     .sort((a, b) => sortKey(a) - sortKey(b));
   return `<form data-kind="characters">
     <h2>${isNew ? "New character" : esc(c.name)}</h2>
-    ${S.inWord && !isNew ? `<div class="toolbar"><button type="button" class="small" data-act="insert" data-text="${esc(c.name)}">Insert name at cursor</button></div>` : ""}
+    ${host.hasDocument && !isNew ? `<div class="toolbar"><button type="button" class="small" data-act="insert" data-text="${esc(c.name)}">Insert name at cursor</button></div>` : ""}
     <div class="grid2">${field("name", "Name", c.name, "text", "", true)}${field("role", "Role", c.role, "text", 'placeholder="e.g. Protagonist"')}</div>
     ${field("aliases", "Nicknames / aliases (comma separated)", c.aliases)}
     <h3>Basics</h3>
@@ -1125,7 +1079,7 @@ async function onClick(ev) {
         toast("You left this series"); break;
       }
       case "doc-link": saveDocLink({ series_id: S.sid, chapter_id: "" }); render(); break;
-      case "insert": await insertText(t.dataset.text); break;
+      case "insert": await host.insertText(t.dataset.text); break;
       case "export": {
         const blob = new Blob([JSON.stringify(S.b, null, 2)], { type: "application/json" });
         const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
@@ -1253,7 +1207,7 @@ async function save(kind, form) {
 }
 
 async function findSelection() {
-  const txt = (await wordSelection()).toLowerCase();
+  const txt = (await host.getSelection()).toLowerCase();
   if (!txt) { toast("Select a name in the document first"); return; }
   const names = (r) => [r.name, ...(r.aliases || "").split(",")].map((x) => (x || "").trim().toLowerCase()).filter(Boolean);
   const c = S.b.characters.find((r) => names(r).includes(txt));
@@ -1305,12 +1259,7 @@ function wire() {
     S.tab = b.dataset.tab; S.view = null; S.filter = ""; render();
     revalidateBundle();  // (a no-op when the new tab opens a form, e.g. Series)
   }));
-  // A plain target=_blank link is unreliable in the Word task pane, so ask
-  // Office to open the system browser there.
-  $("#btnHelp").addEventListener("click", () => {
-    if (S.inWord && window.Office?.context?.ui?.openBrowserWindow) Office.context.ui.openBrowserWindow(HELP_URL);
-    else window.open(HELP_URL, "_blank", "noopener");
-  });
+  $("#btnHelp").addEventListener("click", () => host.openExternal(HELP_URL));
   $("#btnFind").addEventListener("click", () => findSelection().catch((e) => toast(e.message, "error")));
 }
 
@@ -1354,11 +1303,12 @@ async function boot() {
   await loadApp();
 }
 
-function start(info) {
-  S.inWord = !!(info && info.host === Office.HostType.Word);
-  document.body.classList.toggle("in-word", S.inWord);
+async function start() {
+  // If host detection throws, carry on as a plain web page rather than a blank pane.
+  try { await host.init(); } catch (err) { console.error("host init failed", err); }
+  document.body.classList.toggle("has-doc", host.hasDocument);
   wire(); boot();
 }
 
-if (window.Office && Office.onReady) Office.onReady(start);
-else document.addEventListener("DOMContentLoaded", () => start(null));
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+else start();

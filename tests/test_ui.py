@@ -139,6 +139,11 @@ def test_task_pane_walkthrough(server, word):
 
             pg.goto(server)
             pg.wait_for_selector(".list li")
+            # host.js picked the right host, and the document-only controls
+            # follow it (visible only when there is a document beside the pane)
+            assert pg.evaluate("window.host.name") == tag
+            assert pg.is_visible("#btnFind") == word
+            assert pg.evaluate("document.body.classList.contains('has-doc')") == word
             pg.screenshot(path=str(SCREENSHOTS / f"{tag}_1_chars.png"), full_page=True)
             pg.click("text=Betsy Marr")
             pg.wait_for_selector("form[data-kind=characters]")
@@ -196,6 +201,7 @@ def test_task_pane_walkthrough(server, word):
             if word:
                 pg.click("[data-act=doc-link]")
                 pg.wait_for_selector("[data-act=doc-chapter]")
+                pg.wait_for_function("document.querySelector('#toast').textContent.includes('Document linked')")
                 pg.select_option("[data-act=doc-chapter]", label="Ch 1 – Check-in")
                 s = pg.evaluate("window.__settings")
                 assert s["storybible"]["chapter_id"], s
