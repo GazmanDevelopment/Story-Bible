@@ -8,6 +8,7 @@ DOCS = ROOT / "docs"
 LEGAL = [DOCS / "privacy.html", DOCS / "terms.html"]
 PAGES = [DOCS / "index.html", DOCS / "help" / "index.html", *LEGAL]
 APP_JS = (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+HOST_JS = (ROOT / "app" / "static" / "host.js").read_text(encoding="utf-8")
 APP_HTML = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
 
 
@@ -79,7 +80,9 @@ def test_help_url_points_at_the_guide():
     assert m and m.group(1) == "https://gazmandevelopment.github.io/Story-Bible/help/"
     assert (DOCS / "help" / "index.html").exists()
     assert 'id="btnHelp"' in APP_HTML
-    assert "openBrowserWindow" in APP_JS
+    # Word needs Office to open the system browser (host.js); app.js asks the host to.
+    assert "openBrowserWindow" in HOST_JS
+    assert "host.openExternal(HELP_URL)" in APP_JS
 
 
 def test_favicons_present_and_referenced():

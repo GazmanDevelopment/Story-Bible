@@ -6,7 +6,7 @@
   <title>Story Bible</title>
   <link rel="icon" href="favicon.ico" sizes="any">
   <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=3">
+  <link rel="stylesheet" href="styles.css?v=4">
   <!-- Quill (vendored, not CDN - this app is meant to run LAN/VPN-only). See
        app/static/vendor/quill/NOTICE.md for version/license (BSD-3-Clause). -->
   <link rel="stylesheet" href="vendor/quill/quill.snow.css">
@@ -22,11 +22,11 @@
   <header id="top">
     <div class="row">
       <select id="seriesSelect" title="Series"></select>
-      <button id="btnFind" class="icon word-only" title="Look up the selected name in the document">Find</button>
+      <button id="btnFind" class="icon doc-only" title="Look up the selected name in the document">Find</button>
       <button id="btnHelp" class="icon" title="Open the help guide">Help</button>
     </div>
     <div id="authBar" class="linkbar"></div>
-    <div id="linkBar" class="linkbar word-only"></div>
+    <div id="linkBar" class="linkbar doc-only"></div>
     <nav id="tabs">
       <button data-tab="characters">Characters</button>
       <button data-tab="locations">Places</button>
@@ -49,6 +49,7 @@
       </div>
     </div>
   </div>
+  <script src="host.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
