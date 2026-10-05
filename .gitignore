@@ -11,6 +11,9 @@ venv/
 /deploy/compose.yaml
 /deploy/compose.yaml.bak
 
+# clasp (gdocs/README.md): names the one Doc's script a developer last set up
+/gdocs/.clasp.json
+
 # Local notes with Entra tenant/client ids (#74) - matches EntraIDs.txt and EntraIds.txt, since
 # ignore patterns are case-sensitive on Linux (CI, Docker) but not on Windows.
 EntraI[Dd]s.txt

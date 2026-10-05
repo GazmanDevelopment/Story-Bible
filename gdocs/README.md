@@ -25,6 +25,56 @@ else; nothing about the server's auth changes.
 
 ## Install (private / test deployment)
 
+**The script belongs to one Doc, not to your Google account.** It is stored
+with the Doc it was added to (a "container-bound" script). A new, blank Doc, a
+different Google account or a different browser profile starts without it. So
+each manuscript Doc needs the script added once, and the easiest ways are:
+
+1. **Make a copy of a Doc that already has it** (File > Make a copy). The copy
+   keeps the script, so keep one good Doc as a template. Authorise it once
+   again on first use.
+2. **`clasp`** pushes the files from this folder into a Doc in one command
+   (below). Best for adding it to existing Docs.
+3. **Paste the files by hand** in the Apps Script editor (below). Fine for a
+   one-off.
+
+Whichever you use, if your server isn't `https://storybible.huscroft.com.au`,
+edit `SERVER_URL` in `Code.gs` first.
+
+Having it in every Doc without doing any of this needs a published add-on
+(a Google Workspace Marketplace listing, which can be unlisted or private).
+That is not done yet.
+
+### With clasp
+
+One-off setup (needs Node 22 or later):
+
+1. `npm install -g @google/clasp`
+2. Switch on the **Google Apps Script API** at
+   <https://script.google.com/home/usersettings>.
+3. `clasp login` and sign in with the Google account that owns the Docs.
+
+For each Doc, from this `gdocs/` folder, using the Doc's ID (the long string in
+its address, `docs.google.com/document/d/<DOC_ID>/edit`):
+
+```
+clasp create-script --type docs --title "Story Bible" --parentId <DOC_ID>
+clasp push -f
+```
+
+`create-script` makes a script bound to that Doc and writes a `.clasp.json`
+here (it is git-ignored: it names one Doc's script). `push -f` uploads
+`Code.gs`, `Sidebar.html`, `NewTab.html` and `appsscript.json`, and overwrites
+the manifest. To add the script to another Doc, delete `.clasp.json` and run the
+two commands again with that Doc's ID. After changing a file here, `clasp push -f`
+updates the Doc you last set up.
+
+Then reload the Doc and use **Story Bible > Open sidebar**. Accept the one-time
+authorisation prompt ("Google hasn't verified this app" is expected for a
+personal script: Advanced > Go to project).
+
+### By hand
+
 1. Create or open a Google Doc.
 2. **Extensions > Apps Script**.
 3. Replace the contents of `Code.gs` with [Code.gs](Code.gs).
@@ -33,11 +83,11 @@ else; nothing about the server's auth changes.
    have no extension.)
 5. Project Settings (gear) > tick **Show "appsscript.json" manifest file in
    editor**, then replace its contents with [appsscript.json](appsscript.json).
-6. If your server isn't `https://storybible.huscroft.com.au`, edit `SERVER_URL`
-   in `Code.gs`.
-7. Save, reload the Doc, then use **Story Bible > Open sidebar**. Accept the
-   one-time authorisation prompt ("Google hasn't verified this app" is expected
-   for a personal script: Advanced > Go to project).
+6. **Save** (Ctrl+S) in the editor; unsaved files are lost if you close the tab.
+7. Reload the Doc, then use **Story Bible > Open sidebar** and accept the
+   authorisation prompt as above.
+
+## The menu
 
 The **Story Bible** menu has two items: **Open sidebar**, and **Open in New Tab**
 for the plain web version in a tab of its own (no Find or Insert there, since
