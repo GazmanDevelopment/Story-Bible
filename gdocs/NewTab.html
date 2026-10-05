@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font: 13px/1.4 Arial, sans-serif; margin: 12px; }
+    p { margin: 0 0 10px; }
+    button { font: inherit; padding: 4px 12px; }
+  </style>
+</head>
+<body>
+  <p>Story Bible should now be open in a new tab. If nothing happened, your
+     browser blocked it: <a id="go" target="_blank" rel="noopener">open Story Bible</a>.</p>
+  <button id="close" type="button">Close</button>
+  <script>
+    // The URL comes from Code.gs, serialised as a JS string (never spliced into HTML).
+    var URL_ = <?!= JSON.stringify(serverUrl) ?>;
+    document.getElementById('go').href = URL_;
+    document.getElementById('close').addEventListener('click', function () { google.script.host.close(); });
+    // Browsers may block this (it isn't a direct click), hence the link above.
+    window.open(URL_, '_blank', 'noopener');
+  </script>
+</body>
+</html>
