@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body { height: 100%; margin: 0; font: 13px/1.4 Arial, sans-serif; }
+    #pane { border: 0; width: 100%; height: 100%; display: block; }
+    #hint { display: none; padding: 12px; color: #a00; }
+  </style>
+</head>
+<body>
+  <p id="hint">
+    The Story Bible pane hasn't loaded. Check that the server is reachable
+    from this browser, then reopen the sidebar.
+  </p>
+  <iframe id="pane" title="Story Bible"></iframe>
+  <script>
+    // The server URL comes from Code.gs, serialised as a JS string (never
+    // spliced into HTML).
+    var SERVER = <?!= JSON.stringify(serverUrl) ?>;
+    var SERVER_ORIGIN = new URL(SERVER).origin;
+    var frame = document.getElementById('pane');
+
+    // The only requests the pane may make, and the Code.gs function each one
+    // runs. `args` checks and extracts the arguments (null = reject). Keep in
+    // step with call("...") in app/static/host.js (a test checks this).
+    var ROUTES = {
+      getSelection: { fn: 'getSelectionText', args: function () { return []; } },
+      insertText:   { fn: 'insertAtCursor', args: function (a) { return typeof a.text === 'string' && a.text.length <= 1000 ? [a.text] : null; } },
+      readDocLink:  { fn: 'getDocLink', args: function () { return []; } },
+      saveDocLink:  { fn: 'setDocLink', args: function (a) { return typeof a.link === 'string' && a.link.length <= 1000 ? [a.link] : null; } }
+    };
+
+    function reply(id, ok, result, error) {
+      frame.contentWindow.postMessage({ sb: 1, id: id, ok: ok, result: result, error: error }, SERVER_ORIGIN);
+    }
+
+    window.addEventListener('message', function (e) {
+      // Only our own pane, in our own frame. Anything else is ignored.
+      if (e.origin !== SERVER_ORIGIN || e.source !== frame.contentWindow) return;
+      var m = e.data;
+      if (!m || m.sb !== 1 || typeof m.id !== 'number') return;
+
+      var route = Object.prototype.hasOwnProperty.call(ROUTES, m.type) ? ROUTES[m.type] : null;
+      var args = route && m.args && typeof m.args === 'object' ? route.args(m.args) : null;
+      if (!args) { reply(m.id, false, null, 'Unsupported request'); return; }
+
+      var runner = google.script.run
+        .withSuccessHandler(function (result) { reply(m.id, true, result); })
+        .withFailureHandler(function (err) { reply(m.id, false, null, (err && err.message) || 'The request failed'); });
+      runner[route.fn].apply(runner, args);
+    });
+
+    var loaded = false;
+    frame.addEventListener('load', function () { loaded = true; });
+    // gdocs.html, not index.html: same pane, minus Office.js (which blanks a framed page).
+    frame.src = SERVER + '/gdocs.html';
+    setTimeout(function () {
+      if (!loaded) document.getElementById('hint').style.display = 'block';
+    }, 10000);
+  </script>
+</body>
+</html>

@@ -18,6 +18,8 @@ independent of whatever DB the rest of the pytest session is using.
 """
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import socket
 import subprocess
@@ -1230,24 +1232,54 @@ def test_a_shared_member_sees_who_shared_it_and_can_leave(server, browser_page):
     assert not errors, errors
 
 
-def test_pane_renders_framed_by_a_different_origin(server):
-    """The Google Docs sidebar frames /gdocs.html from another origin. Office.js
-    blanks a framed page (it assumes an Office host), so that page must work
-    without it - and the pane must render and be usable inside the frame."""
+GDOCS_DIR = ROOT / "gdocs"
+
+# A stand-in for Apps Script's google.script.run + the Doc behind it: just
+# enough to run the real gdocs/Sidebar.html and see what the pane asks of it.
+FAKE_APPS_SCRIPT = """
+window.__sel = 'Betsy Marr';
+window.__inserted = [];
+window.__props = {};
+window.__calls = [];
+const fns = {
+  getSelectionText: () => window.__sel,
+  insertAtCursor: (t) => { window.__inserted.push(t); return true; },
+  getDocLink: () => window.__props.storybible || null,
+  setDocLink: (l) => { window.__props.storybible = l; },
+};
+function runner(ok, fail) {
+  return new Proxy({}, { get(_, name) {
+    if (name === 'withSuccessHandler') return (f) => runner(f, fail);
+    if (name === 'withFailureHandler') return (f) => runner(ok, f);
+    return (...args) => {
+      window.__calls.push(name);
+      setTimeout(() => { try { const r = fns[name](...args); ok && ok(r); } catch (e) { fail && fail(e); } }, 0);
+    };
+  } });
+}
+window.google = { script: { run: runner() } };
+"""
+
+
+@contextlib.contextmanager
+def _gdocs_page(server):
+    """The real gdocs/Sidebar.html (only google.script.run faked) served from a
+    different origin than the pane, as in a Doc; yields (page, frame, errors)."""
     import http.server
     import threading
 
-    parent = (f'<!doctype html><body style="margin:0;height:100vh"><iframe id="pane" '
-              f'sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" '
-              f'style="border:0;width:100%;height:100%" src="{server}/gdocs.html"></iframe>').encode()
+    sidebar = (GDOCS_DIR / "Sidebar.html").read_text(encoding="utf-8")
+    assert "<?!= JSON.stringify(serverUrl) ?>" in sidebar
+    html = sidebar.replace("<?!= JSON.stringify(serverUrl) ?>", json.dumps(server))
+    html = html.replace("<body>", f"<body><script>{FAKE_APPS_SCRIPT}</script>", 1).encode()
 
     class Parent(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(parent)))
+            self.send_header("Content-Length", str(len(html)))
             self.end_headers()
-            self.wfile.write(parent)
+            self.wfile.write(html)
 
         def log_message(self, *args):
             pass
@@ -1263,13 +1295,83 @@ def test_pane_renders_framed_by_a_different_origin(server):
                 pg.on("pageerror", lambda e: errors.append(str(e)))
                 # parent is http://localhost:<port>, the pane http://127.0.0.1:<port>: different sites
                 pg.goto(f"http://localhost:{srv.server_address[1]}/")
-                fr = pg.frame_locator("#pane")
-                fr.locator(".list li").first.wait_for(timeout=15000)
-                fr.locator(".list li >> text=Betsy Marr").first.click()
-                fr.locator("form[data-kind=characters]").wait_for()
-                assert not fr.locator("#btnFind").is_visible()   # no document host yet: Find stays hidden
+                yield pg, pg.frame_locator("#pane"), errors
             finally:
                 browser.close()
     finally:
         srv.shutdown()
+    assert not errors, errors
+
+
+def test_gdocs_sidebar_find_insert_and_doc_link(server):
+    """The pane framed by the real sidebar shell: Find reads the selection,
+    Insert writes it, and the document link is saved and read back."""
+    with _gdocs_page(server) as (pg, fr, _errors):
+        fr.locator(".list li").first.wait_for(timeout=15000)
+        assert fr.locator("#btnFind").is_visible()   # a document is beside the pane
+
+        fr.locator("#btnFind").click()               # selection is 'Betsy Marr'
+        fr.locator("h2:text('Betsy Marr')").wait_for()
+        fr.locator("text=Insert name at cursor").click()
+        pg.wait_for_function("window.__inserted.length === 1")
+        assert pg.evaluate("window.__inserted") == ["Betsy Marr"]
+
+        pg.evaluate("window.__sel = ''")             # nothing selected
+        fr.locator("#btnFind").click()
+        fr.locator("text=Select a name in the document first").wait_for()
+
+        fr.locator("[data-act=doc-link]").click()
+        fr.locator("[data-act=doc-chapter]").wait_for()
+        values = fr.locator("[data-act=doc-chapter] option").evaluate_all("els => els.map(e => e.value)")
+        chapter = next(v for v in values if v)
+        fr.locator("[data-act=doc-chapter]").select_option(chapter)
+        pg.wait_for_function(f"(window.__props.storybible || '').includes('{chapter}')")
+        link = json.loads(pg.evaluate("window.__props.storybible"))
+        assert link["chapter_id"] == chapter and link["series_id"]
+
+        # reload just the pane (the Doc, and so its stored link, stays): it comes back linked
+        pg.evaluate("document.getElementById('pane').src = document.getElementById('pane').src")
+        fr = pg.frame_locator("#pane")
+        fr.locator("[data-act=doc-chapter]").wait_for(timeout=15000)
+        assert fr.locator("[data-act=doc-chapter]").input_value() == chapter
+
+
+def test_gdocs_shell_ignores_foreign_and_unsupported_messages(server):
+    """Only our own pane, from our own origin, and only the four routes get
+    through to Apps Script - everything else is dropped before any call."""
+    with _gdocs_page(server) as (pg, fr, _errors):
+        fr.locator(".list li").first.wait_for(timeout=15000)
+        pg.wait_for_function("window.__calls.length >= 1")   # the pane's own start-up read
+        before = pg.evaluate("window.__calls.length")
+        post = """(o) => window.dispatchEvent(new MessageEvent('message', {
+            data: o.data, origin: o.origin,
+            source: o.self ? window : document.getElementById('pane').contentWindow }))"""
+        good = {"sb": 1, "id": 900, "type": "insertText", "args": {"text": "x"}}
+        server_origin = server
+        for attempt in (
+            {"data": good, "origin": "https://evil.example"},                        # wrong origin
+            {"data": good, "origin": server_origin, "self": True},                   # right origin, wrong window
+            {"data": {**good, "type": "deleteEverything"}, "origin": server_origin}, # not a route
+            {"data": {**good, "type": "constructor"}, "origin": server_origin},      # prototype key, not a route
+            {"data": {**good, "args": {"text": 5}}, "origin": server_origin},        # bad argument type
+            {"data": {**good, "args": {"text": "x" * 1001}}, "origin": server_origin},  # oversized argument
+            {"data": {"id": 900, "type": "insertText", "args": {"text": "x"}}, "origin": server_origin},  # no marker
+        ):
+            pg.evaluate(post, attempt)
+        pg.wait_for_timeout(300)
+        assert pg.evaluate("window.__calls.length") == before
+        assert pg.evaluate("window.__inserted") == []
+        # ...and the real thing still works afterwards
+        fr.locator("#btnFind").click()
+        fr.locator("h2:text('Betsy Marr')").wait_for()
+
+
+def test_gdocs_page_opened_directly_is_just_the_web_pane(server, browser_page):
+    """Outside a Doc there is no shell to talk to, so /gdocs.html must not
+    pretend there is a document (it would wait on a parent that isn't there)."""
+    pg, errors = browser_page
+    pg.goto(f"{server}/gdocs.html")
+    pg.wait_for_selector(".list li")
+    assert pg.evaluate("window.host.name") == "web"
+    assert not pg.is_visible("#btnFind")
     assert not errors, errors
