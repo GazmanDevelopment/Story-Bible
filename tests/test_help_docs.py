@@ -61,7 +61,7 @@ def test_images_have_alt_text():
 
 def test_guide_sections_present():
     ids = _scan(DOCS / "help" / "index.html").ids
-    for sec in ("getting-started", "series", "timeline", "relationship-types",
+    for sec in ("getting-started", "google-docs", "series", "timeline", "relationship-types",
                 "adding", "linking", "research", "backup", "feedback", "privacy", "delete-account"):
         assert sec in ids
 
@@ -168,3 +168,41 @@ def test_guide_and_readme_link_to_legal_pages():
     assert "being finalised" not in guide
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/privacy.html" in readme and "docs/terms.html" in readme
+
+
+def _guide():
+    return (DOCS / "help" / "index.html").read_text(encoding="utf-8")
+
+
+def test_guide_describes_google_docs_and_matches_the_menu():
+    """The Google Docs section quotes the add-on's real menu labels (gdocs/Code.gs)."""
+    guide = _guide()
+    code = (ROOT / "gdocs" / "Code.gs").read_text(encoding="utf-8")
+    assert re.search(r'<h2 id="google-docs">', guide) and "gdocs-sidebar.png" in guide
+    assert "<strong>Story Bible</strong>" in guide   # the menu's title (createMenu)
+    assert "createMenu('Story Bible')" in code
+    for label in re.findall(r"addItem\('([^']+)'", code):
+        assert f"<strong>{label}</strong>" in guide, f"menu item {label!r} not in the guide"
+    for feature in ("Find", "Insert name at cursor", "Link to this series"):
+        assert feature in guide
+
+
+def test_guide_images_declare_their_real_size():
+    """width/height on each <img> match the PNG, so the page doesn't jump while
+    images load and a screenshot that changed size can't go unnoticed."""
+    import struct
+
+    for img in _scan(DOCS / "help" / "index.html").imgs:
+        data = (DOCS / "help" / img["src"]).read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", img["src"]
+        w, h = struct.unpack(">II", data[16:24])
+        assert (int(img["width"]), int(img["height"])) == (w, h), f"{img['src']} is {w}x{h}"
+
+
+def test_guide_has_no_stale_word_only_wording_or_issue_numbers():
+    guide = _guide()
+    assert "Word only" not in guide and "Word-only" not in guide   # Find etc. now also work in Google Docs
+    assert not re.search(r"#\d+", guide), "issue number in user-facing text"
+    index = (DOCS / "index.html").read_text(encoding="utf-8")
+    assert 'href="help/#google-docs"' in index
+

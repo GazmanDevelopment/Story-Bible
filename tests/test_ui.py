@@ -192,7 +192,7 @@ def test_task_pane_walkthrough(server, word):
             pg.click("#tabs >> text=Places")
             pg.wait_for_selector(".list >> text=The Lake House")
             pg.click("#tabs >> text=Series")
-            pg.wait_for_selector("text=Chapters (one Word doc each)")
+            pg.wait_for_selector("text=Chapters (one document each)")
             pg.screenshot(path=str(SCREENSHOTS / f"{tag}_4_series.png"), full_page=True)
 
             # switch series
