@@ -124,3 +124,42 @@ def test_only_the_routed_functions_are_public_in_code_gs():
     allowed = {"onOpen", "onInstall", "showSidebar", "openInNewTab",
                "getSelectionText", "insertAtCursor", "getDocLink", "setDocLink"}
     assert public - helpers == allowed, public - helpers ^ allowed
+
+
+# ---------------------------------------------------------------- installing it (clasp)
+ROOT = Path(__file__).resolve().parent.parent
+GDOCS_README = (GDOCS_DIR / "README.md").read_text(encoding="utf-8")
+
+
+def test_gdocs_folder_pushes_exactly_the_four_files_the_readme_names():
+    # clasp pushes the manifest plus .js/.gs/.ts/.html files and ignores the rest
+    # (README.md, .clasp.json), so those four are what lands in a Doc. A new script
+    # file here must be added to the README's file table and the by-hand steps too.
+    pushed = {p.name for p in GDOCS_DIR.iterdir()
+              if p.is_file() and (p.suffix in {".gs", ".js", ".ts", ".html"} or p.name == "appsscript.json")}
+    assert pushed == {"Code.gs", "Sidebar.html", "NewTab.html", "appsscript.json"}
+    for name in pushed:
+        assert f"[{name}]({name})" in GDOCS_README, f"{name} not in the README's file table"
+    assert not (GDOCS_DIR / ".claspignore").exists(), "the default push rules are what the README relies on"
+
+
+def test_manifest_is_valid_and_asks_for_the_minimum_scopes():
+    import json
+
+    manifest = json.loads((GDOCS_DIR / "appsscript.json").read_text(encoding="utf-8"))
+    assert manifest["runtimeVersion"] == "V8"
+    assert set(manifest["oauthScopes"]) == {
+        "https://www.googleapis.com/auth/documents.currentonly",
+        "https://www.googleapis.com/auth/script.container.ui",
+    }
+
+
+def test_readme_documents_clasp_and_the_per_doc_install():
+    assert "clasp create-script --type docs --title \"Story Bible\" --parentId <DOC_ID>" in GDOCS_README
+    assert "clasp push -f" in GDOCS_README
+    assert "Make a copy" in GDOCS_README and "belongs to one Doc" in GDOCS_README.replace("\n", " ").replace("  ", " ")
+    # .clasp.json names one Doc's script, so it stays out of git
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "/gdocs/.clasp.json" in gitignore.splitlines()
+    guide = (ROOT / "docs" / "help" / "index.html").read_text(encoding="utf-8")
+    assert "Make a copy" in guide and "not to your Google account" in guide
