@@ -1228,3 +1228,48 @@ def test_a_shared_member_sees_who_shared_it_and_can_leave(server, browser_page):
     pg.wait_for_function("window.left === true")
     assert "Create a series to get started" in pg.inner_text("#main")  # left -> no series selected
     assert not errors, errors
+
+
+def test_pane_renders_framed_by_a_different_origin(server):
+    """The Google Docs sidebar frames /gdocs.html from another origin. Office.js
+    blanks a framed page (it assumes an Office host), so that page must work
+    without it - and the pane must render and be usable inside the frame."""
+    import http.server
+    import threading
+
+    parent = (f'<!doctype html><body style="margin:0;height:100vh"><iframe id="pane" '
+              f'sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts" '
+              f'style="border:0;width:100%;height:100%" src="{server}/gdocs.html"></iframe>').encode()
+
+    class Parent(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(parent)))
+            self.end_headers()
+            self.wfile.write(parent)
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Parent)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    errors: list[str] = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                pg = browser.new_page(viewport={"width": 360, "height": 780})
+                pg.on("pageerror", lambda e: errors.append(str(e)))
+                # parent is http://localhost:<port>, the pane http://127.0.0.1:<port>: different sites
+                pg.goto(f"http://localhost:{srv.server_address[1]}/")
+                fr = pg.frame_locator("#pane")
+                fr.locator(".list li").first.wait_for(timeout=15000)
+                fr.locator(".list li >> text=Betsy Marr").first.click()
+                fr.locator("form[data-kind=characters]").wait_for()
+                assert not fr.locator("#btnFind").is_visible()   # no document host yet: Find stays hidden
+            finally:
+                browser.close()
+    finally:
+        srv.shutdown()
+    assert not errors, errors

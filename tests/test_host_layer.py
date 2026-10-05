@@ -32,6 +32,25 @@ def test_host_js_is_served_and_loaded_between_office_js_and_app_js():
     assert order == sorted(order), "host.js must load after office.js and before app.js"
 
 
+GDOCS = (STATIC / "gdocs.html").read_text(encoding="utf-8")
+
+
+def test_gdocs_page_is_index_minus_office_js():
+    # Office.js blanks any page it finds itself framed in (it assumes an Office
+    # host), and the Google Docs sidebar frames the pane - so that page must not
+    # load it. Everything else must stay identical to the Word page.
+    assert c.get("/gdocs.html").status_code == 200
+    assert "appsforoffice" not in GDOCS
+    strip_comments = lambda s: re.sub(r"<!--.*?-->", "", s, flags=re.S)  # noqa: E731
+    strip_office = lambda s: re.sub(r'\s*<script src="https://appsforoffice[^>]*></script>', "", s)  # noqa: E731
+    norm = lambda s: re.sub(r"\s+", " ", strip_comments(strip_office(s)).replace(' data-host="gdocs"', ""))  # noqa: E731
+    assert norm(GDOCS) == norm(INDEX), "gdocs.html drifted from index.html"
+    assert 'data-host="gdocs"' in GDOCS and 'data-host' not in INDEX
+    # the same scripts, in the same order
+    scripts = lambda s: re.findall(r'<script src="([^"]+)"', s)  # noqa: E731
+    assert [x for x in scripts(INDEX) if "appsforoffice" not in x] == scripts(GDOCS)
+
+
 def test_app_js_does_not_call_office_directly():
     # The only Office.js code lives in host.js (auth-dialog.js is the dialog
     # page's own script and is out of scope here).

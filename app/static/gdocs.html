@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en" data-host="gdocs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Story Bible</title>
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css?v=4">
+  <!-- Quill (vendored, not CDN - this app is meant to run LAN/VPN-only). See
+       app/static/vendor/quill/NOTICE.md for version/license (BSD-3-Clause). -->
+  <link rel="stylesheet" href="vendor/quill/quill.snow.css">
+  <!-- No Office.js here: this is the page the Google Docs sidebar frames. When Office.js
+       finds itself in an iframe it assumes an Office host and blanks the frame, so the
+       Word page (index.html) and this one differ only by that script tag. -->
+  <script src="vendor/quill/quill.js"></script>
+  <!-- MSAL.js (vendored, not CDN - see app/static/vendor/msal/NOTICE.md,
+       MIT). Sign-in for AUTH_MODE=entra (#13); harmless to load when
+       AUTH_MODE is "none"/"token" - just never used. -->
+  <script src="vendor/msal/msal-browser.min.js"></script>
+</head>
+<body>
+  <header id="top">
+    <div class="row">
+      <select id="seriesSelect" title="Series"></select>
+      <button id="btnFind" class="icon doc-only" title="Look up the selected name in the document">Find</button>
+      <button id="btnHelp" class="icon" title="Open the help guide">Help</button>
+    </div>
+    <div id="authBar" class="linkbar"></div>
+    <div id="linkBar" class="linkbar doc-only"></div>
+    <nav id="tabs">
+      <button data-tab="characters">Characters</button>
+      <button data-tab="locations">Places</button>
+      <button data-tab="events">Timeline</button>
+      <button data-tab="research">Research</button>
+      <button data-tab="series">Series</button>
+    </nav>
+  </header>
+  <main id="main"></main>
+  <div id="toast"></div>
+  <!-- #58: a small in-page confirm modal, reused for the unsaved-changes
+       guard and the save-conflict prompt - see styles.css for why not
+       window.confirm(). -->
+  <div id="modalOverlay" class="modal-overlay" hidden>
+    <div class="modal">
+      <p id="modalMessage"></p>
+      <div class="modal-actions">
+        <button data-act="modal-cancel">Cancel</button>
+        <button class="primary" id="modalConfirmBtn" data-act="modal-confirm">OK</button>
+      </div>
+    </div>
+  </div>
+  <script src="host.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
