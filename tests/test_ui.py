@@ -236,6 +236,19 @@ def browser_page():
             browser.close()
 
 
+def test_service_worker_registers_in_the_web_host(server, browser_page):
+    """#164: the installable-app service worker registers in a browser tab, so
+    a phone offers Install, and doesn't get in the pane's way."""
+    pg, errors = browser_page
+    pg.goto(server)
+    pg.wait_for_selector(".list li")
+    scopes = pg.evaluate(
+        "async () => { const r = await navigator.serviceWorker.ready;"
+        " return [new URL(r.scope).pathname]; }")
+    assert scopes == ["/"]
+    assert not errors, errors
+
+
 def test_timeline_pill_filters_grey_out_not_hide(server, browser_page):
     """#97: character/place pills multi-select and grey out (never hide)
     non-matching timeline entries. Characters AND together, places OR."""
