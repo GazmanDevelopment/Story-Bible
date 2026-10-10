@@ -11,7 +11,7 @@ Word task-pane add-in plus a small FastAPI server for keeping a story bible (cha
 - **[docs/PROCESSING.md](docs/PROCESSING.md)** / **[docs/BREACH.md](docs/BREACH.md)**: the record of what personal data is held and why (with log retention and the ICO fee decision), and the data-breach checklist (#114)
 - **[docs/privacy.html](docs/privacy.html)** / **[docs/terms.html](docs/terms.html)**: the privacy policy and terms of use, published alongside the help guide
 - `app/`: FastAPI backend (`main.py`) and task pane (`static/`)
-- **[gdocs/](gdocs/README.md)**: the Google Docs add-on (Apps Script): a sidebar shell around the same pane, with Find, Insert name at cursor and document linking, plus an Open in New Tab menu item (#153)
+- **[gdocs/](gdocs/README.md)**: the Google Docs add-on (Apps Script): a sidebar shell around the same pane, with Find, Insert name at cursor and document linking, plus an Open in New Tab menu item (#153). The script lives in each Doc, so it is added per Doc (copy a Doc that has it, `clasp push`, or paste by hand)
 - `manifest.dev.xml` / `manifest.prod.xml`: Word add-in manifests, generated from `manifest.template.xml` by `scripts/generate_manifest.py` (#8) - edit the template, not the generated files
 - **[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)**: licenses for the pip packages this app ships, generated from `requirements.txt` by `scripts/generate_third_party_notices.py` (#66) - vendored front-end libraries (Quill, MSAL.js) have their own notices in `app/static/vendor/*/NOTICE.md` instead
 - `samples/`: two fictional sample series (import-ready JSON)
