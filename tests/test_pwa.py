@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import struct
 import tempfile
 from pathlib import Path
 
@@ -44,14 +45,12 @@ def test_manifest_has_what_browsers_need_to_offer_install():
 
 
 def test_every_manifest_icon_is_served_at_its_declared_size():
-    from PIL import Image
-    import io
     _, m = _manifest()
     for icon in m["icons"]:
         r = c.get("/" + icon["src"])
         assert r.status_code == 200, icon["src"]
         assert r.headers["content-type"] == "image/png"
-        w, h = Image.open(io.BytesIO(r.content)).size
+        w, h = struct.unpack(">II", r.content[16:24])   # PNG IHDR width/height (no Pillow in CI)
         assert f"{w}x{h}" == icon["sizes"], icon["src"]
 
 

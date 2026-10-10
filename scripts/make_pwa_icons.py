@@ -3,6 +3,7 @@ Regenerates the installable-app icons (app/static/assets/icon-192.png,
 icon-512.png, icon-maskable-512.png) from the same book glyph as the 128px
 Word icon. Drawn at 4x and downsampled so the edges stay crisp.
 
+    pip install pillow   # dev-only; not a runtime or CI dependency
     python scripts/make_pwa_icons.py
 
 The glyph is defined on the 128px grid of icon-128.png. "any" icons keep the
