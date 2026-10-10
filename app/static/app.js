@@ -1303,10 +1303,18 @@ async function boot() {
   await loadApp();
 }
 
+// #164: a service worker makes the web app installable on a phone. Only for the
+// plain web host in its own tab - not inside Word or the Google Docs sidebar.
+function registerServiceWorker() {
+  if (host.name !== "web" || window.parent !== window || !("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("sw.js", { scope: "/" }).catch((err) => console.warn("service worker not registered", err));
+}
+
 async function start() {
   // If host detection throws, carry on as a plain web page rather than a blank pane.
   try { await host.init(); } catch (err) { console.error("host init failed", err); }
   document.body.classList.toggle("has-doc", host.hasDocument);
+  registerServiceWorker();
   wire(); boot();
 }
 
